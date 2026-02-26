@@ -1,0 +1,271 @@
+{
+  "state": {
+    "motor_status": {
+      "value": 1,
+      "text": "Вращение вперед"
+    },
+    "current": 587,
+    "speed": 236.0,
+    "target_speed": 1500,
+    "position": 1165,
+    "temperatures": {
+      "mcu": 31.5,
+      "mosfet": 30.0,
+      "brake": 30.0
+    },
+    "error_code": 0,
+    "direction": {
+      "value": 1,
+      "text": "Вперед"
+    },
+    "mode_device": {
+      "value": 1,
+      "text": "MODBUS"
+    },
+    "mode_rotation": {
+      "value": 1,
+      "text": "Непрерывное"
+    },
+    "is_running": true,
+    "task_counter": 80,
+    "statistics": {
+      "total_runtime": 5.975674152374268,
+      "commands_processed": 4,
+      "errors_generated": 0,
+      "temperature_warnings": 0
+    }
+  },
+  "registers": {
+    "holding_registers": {
+      "system_ax": {
+        "value": 16972,
+        "hex": "0x424c",
+        "ascii": "BL"
+      },
+      "system_bx": {
+        "value": 21316,
+        "hex": "0x5344",
+        "ascii": "SD"
+      },
+      "system_cx": {
+        "value": 11570,
+        "hex": "0x2d32",
+        "ascii": "-2"
+      },
+      "system_dx": {
+        "value": 12365,
+        "hex": "0x304d",
+        "ascii": "0M"
+      },
+      "system_ex": {
+        "value": 28516,
+        "hex": "0x6f64",
+        "ascii": "od"
+      },
+      "system_fx": {
+        "value": 25205,
+        "hex": "0x6275",
+        "ascii": "bu"
+      },
+      "system_pc": {
+        "value": 115,
+        "hex": "0x73",
+        "ascii": ".s"
+      },
+      "slave_addr": {
+        "value": 1,
+        "hex": "0x1",
+        "description": "Адрес устройства"
+      },
+      "modbus_type": {
+        "value": 1,
+        "hex": "0x1",
+        "description": "Тип Modbus"
+      },
+      "modbus_baud": {
+        "value": 115200,
+        "hex": "0x1c200",
+        "description": "Скорость Modbus"
+      },
+      "timeout": {
+        "value": 1000,
+        "hex": "0x3e8",
+        "description": "Таймаут"
+      },
+      "mode_device": {
+        "value": 1,
+        "hex": "0x1",
+        "description": "Режим устройства"
+      },
+      "mode_rotation": {
+        "value": 1,
+        "hex": "0x1",
+        "description": "Режим вращения"
+      },
+      "ref_current": {
+        "value": 10000,
+        "hex": "0x2710",
+        "description": "Ограничение тока"
+      },
+      "hold_current": {
+        "value": 1000,
+        "hex": "0x3e8",
+        "description": "Ток удержания"
+      },
+      "set_speed": {
+        "value": 1500,
+        "hex": "0x5dc",
+        "description": "Установленная скорость"
+      },
+      "acceleration": {
+        "value": 200,
+        "hex": "0xc8",
+        "description": "Ускорение"
+      },
+      "deceleration": {
+        "value": 200,
+        "hex": "0xc8",
+        "description": "Замедление"
+      },
+      "direction": {
+        "value": 1,
+        "hex": "0x1",
+        "description": "Направление"
+      },
+      "n_poles": {
+        "value": 8,
+        "hex": "0x8",
+        "description": "Количество полюсов"
+      },
+      "offset": {
+        "value": 0,
+        "hex": "0x0",
+        "description": "Смещение"
+      },
+      "target_position": {
+        "value": 0,
+        "hex": "0x0",
+        "description": "Целевая позиция"
+      },
+      "position1": {
+        "value": 0,
+        "hex": "0x0",
+        "description": "Позиция 1"
+      },
+      "position2": {
+        "value": 10000,
+        "hex": "0x2710",
+        "description": "Позиция 2"
+      },
+      "position3": {
+        "value": 20000,
+        "hex": "0x4e20",
+        "description": "Позиция 3"
+      },
+      "position4": {
+        "value": 30000,
+        "hex": "0x7530",
+        "description": "Позиция 4"
+      }
+    },
+    "input_registers": {
+      "status": {
+        "value": 1,
+        "hex": "0x1",
+        "description": "Статус двигателя"
+      },
+      "current": {
+        "value": 532,
+        "hex": "0x214",
+        "description": "Ток двигателя"
+      },
+      "speed": {
+        "value": 0,
+        "hex": "0x0",
+        "description": "Скорость двигателя"
+      },
+      "position": {
+        "value": 3668,
+        "hex": "0xe54",
+        "description": "Позиция двигателя"
+      },
+      "temp_mcu": {
+        "value": 304,
+        "hex": "0x130",
+        "description": "Температура MCU"
+      },
+      "temp_mosfet": {
+        "value": 300,
+        "hex": "0x12c",
+        "description": "Температура MOSFET"
+      },
+      "temp_brake": {
+        "value": 300,
+        "hex": "0x12c",
+        "description": "Температура тормоза"
+      },
+      "task_counter": {
+        "value": 129,
+        "hex": "0x81",
+        "description": "Счетчик задач"
+      },
+      "hw_major": {
+        "value": 1000,
+        "hex": "0x3e8",
+        "description": "Тип драйвера"
+      },
+      "hw_minor": {
+        "value": 1,
+        "hex": "0x1",
+        "description": "Версия аппаратной части"
+      },
+      "fw_major": {
+        "value": 1,
+        "hex": "0x1",
+        "description": "Идентификатор ПО"
+      },
+      "fw_minor": {
+        "value": 0,
+        "hex": "0x0",
+        "description": "Версия ПО"
+      }
+    },
+    "coils": {
+      "coil_start": {
+        "value": false,
+        "description": "Запуск двигателя"
+      },
+      "coil_stop": {
+        "value": false,
+        "description": "Остановка двигателя"
+      },
+      "coil_hard_stop": {
+        "value": false,
+        "description": "Аварийная остановка"
+      },
+      "coil_clear_position": {
+        "value": false,
+        "description": "Сброс позиции"
+      }
+    },
+    "settings": {
+      "slave_addr": 1,
+      "modbus_type": 1,
+      "modbus_baud": 115200,
+      "timeout": 1000,
+      "mode_device": 1,
+      "mode_rotation": 1,
+      "ref_current": 10000,
+      "hold_current": 1000,
+      "set_speed": 1000,
+      "acceleration": 100,
+      "deceleration": 100,
+      "direction": 1,
+      "n_poles": 8,
+      "position1": 0,
+      "position2": 10000,
+      "position3": 20000,
+      "position4": 30000
+    }
+  }
+}

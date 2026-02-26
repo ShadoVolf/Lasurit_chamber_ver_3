@@ -1,0 +1,35 @@
+{
+  "trm12": {
+    "com_port": "COM10",
+    "baudrate": 9600,
+    "data_bits": 8,
+    "stop_bits": 1,
+    "parity": "N",
+    "timeout": 1.0,
+    "address": 16,
+    "auto_select_com": true,
+    "connected": false
+  },
+  "blsd20": {
+    "com_port": "COM11",
+    "baudrate": 115200,
+    "data_bits": 8,
+    "stop_bits": 1,
+    "parity": "N",
+    "timeout": 1.0,
+    "address": 1,
+    "auto_select_com": true,
+    "connected": false
+  },
+  "rs232_relay": {
+    "com_port": "COM16",
+    "baudrate": 9600,
+    "data_bits": 8,
+    "stop_bits": 1,
+    "parity": "N",
+    "timeout": 2.0,
+    "address": 0,
+    "auto_select_com": true,
+    "connected": false
+  }
+}

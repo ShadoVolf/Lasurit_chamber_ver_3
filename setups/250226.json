@@ -1,0 +1,32 @@
+[
+  {
+    "temperature": 50.0,
+    "rate": 5.0,
+    "hold_time": 10.0
+  },
+  {
+    "temperature": 60.0,
+    "rate": 5.0,
+    "hold_time": 10.0
+  },
+  {
+    "temperature": 70.0,
+    "rate": 5.0,
+    "hold_time": 10.0
+  },
+  {
+    "temperature": 80.0,
+    "rate": 5.0,
+    "hold_time": 10.0
+  },
+  {
+    "temperature": 25.0,
+    "rate": 5.0,
+    "hold_time": 10.0
+  },
+  {
+    "temperature": 25.0,
+    "rate": 5.0,
+    "hold_time": 10.0
+  }
+]

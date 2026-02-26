@@ -1,0 +1,68 @@
+import os
+
+def setup_fonts(dpg, FontName):
+    # Загружаем шрифт с поддержкой кириллицы
+    big_let_start = 0x00C0  # Capital "A" in cyrillic alphabet
+    big_let_end = 0x00DF  # Capital "Я" in cyrillic alphabet
+    small_let_end = 0x00FF  # small "я" in cyrillic alphabet
+    remap_big_let = 0x0410  # Starting number for remapped cyrillic alphabet
+    alph_len = big_let_end - big_let_start + 1  # adds the shift from big letters to small
+    alph_shift = remap_big_let - big_let_start  # adds the shift from remapped to non-remapped
+
+    # Текущая папка запуска программы
+    current_dir = os.getcwd()
+    # Полный путь к файлу шрифта
+    font_path = os.path.join(current_dir, "fonts", FontName + ".otf")
+
+    with dpg.font_registry():
+        with dpg.font(font_path, 12) as default_font:
+            dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
+            dpg.add_font_range_hint(dpg.mvFontRangeHint_Cyrillic)
+            dpg.add_font_range(0x2500, 0x257F)  # Box Drawing
+            biglet = remap_big_let  # Starting number for remapped cyrillic alphabet
+            for i1 in range(big_let_start, big_let_end + 1):  # Cycle through big letters in cyrillic alphabet
+                dpg.add_char_remap(i1, biglet)  # Remap the big cyrillic letter
+                dpg.add_char_remap(i1 + alph_len, biglet + alph_len)  # Remap the small cyrillic letter
+                biglet += 1  # choose next letter
+            dpg.bind_font(default_font)
+
+        with dpg.font(font_path, 18) as second_font:
+            dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
+            dpg.add_font_range_hint(dpg.mvFontRangeHint_Cyrillic)
+            dpg.add_font_range(0x2500, 0x257F)  # Box Drawing
+            biglet = remap_big_let
+            for i1 in range(big_let_start, big_let_end + 1):
+                dpg.add_char_remap(i1, biglet)
+                dpg.add_char_remap(i1 + alph_len, biglet + alph_len)
+                biglet += 1
+            dpg.bind_font(default_font)
+
+        with dpg.font(font_path, 50, tag='large_font'):
+            dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
+            dpg.add_font_range_hint(dpg.mvFontRangeHint_Cyrillic)
+            dpg.add_font_range(0x2500, 0x257F)  # Box Drawing
+            biglet = remap_big_let
+            for i1 in range(big_let_start, big_let_end + 1):
+                dpg.add_char_remap(i1, biglet)
+                dpg.add_char_remap(i1 + alph_len, biglet + alph_len)
+                biglet += 1
+
+        with dpg.font(font_path, 30, tag='medium_font'):
+            dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
+            dpg.add_font_range_hint(dpg.mvFontRangeHint_Cyrillic)
+            dpg.add_font_range(0x2500, 0x257F)  # Box Drawing
+            biglet = remap_big_let
+            for i1 in range(big_let_start, big_let_end + 1):
+                dpg.add_char_remap(i1, biglet)
+                dpg.add_char_remap(i1 + alph_len, biglet + alph_len)
+                biglet += 1
+
+        with dpg.font(font_path, 20) as medium_font1:
+            dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
+            dpg.add_font_range_hint(dpg.mvFontRangeHint_Cyrillic)
+            dpg.add_font_range(0x2500, 0x257F)  # Box Drawing
+            biglet = remap_big_let
+            for i1 in range(big_let_start, big_let_end + 1):
+                dpg.add_char_remap(i1, biglet)
+                dpg.add_char_remap(i1 + alph_len, biglet + alph_len)
+                biglet += 1
