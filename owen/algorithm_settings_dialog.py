@@ -4,8 +4,24 @@
 """
 import json
 import os
+import sys
 
-CONFIG_FILE = "chamber_algorithm_config.json"
+
+def get_config_path():
+    """
+    Возвращает путь к файлу конфигурации в рабочей директории.
+    Для скомпилированного exe – рядом с исполняемым файлом,
+    для скрипта – в текущей рабочей директории.
+    """
+    if getattr(sys, 'frozen', False):
+        # Если приложение запущено как скомпилированный exe
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        # Если запущено как обычный скрипт Python
+        base_dir = os.getcwd()
+    return os.path.join(base_dir, "chamber_algorithm_config.json")
+
+CONFIG_FILE = get_config_path()
 
 def _load_settings_from_file(chamber_process):
     """Загружает настройки из файла. Если файла нет, создаёт дефолтные и сохраняет."""
@@ -32,25 +48,23 @@ def _load_settings_from_file(chamber_process):
         "shaft_heating_interval": 60.0,
     }
 
-    if os.path.exists(CONFIG_FILE):
+    config_path = CONFIG_FILE  # используем переменную
+    if os.path.exists(config_path):
         try:
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            with open(config_path, 'r', encoding='utf-8') as f:
                 loaded = json.load(f)
-                # Обновляем defaults, чтобы не потерять новые ключи
                 defaults.update(loaded)
         except Exception as e:
-            print(f"Ошибка загрузки {CONFIG_FILE}: {e}")
+            print(f"Ошибка загрузки {config_path}: {e}")
     else:
         try:
-            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            with open(config_path, 'w', encoding='utf-8') as f:
                 json.dump(defaults, f, indent=4, ensure_ascii=False)
         except Exception as e:
-            print(f"Ошибка создания {CONFIG_FILE}: {e}")
-
+            print(f"Ошибка создания {config_path}: {e}")
     return defaults
 
 def _save_settings_to_file(settings):
-    """Сохраняет словарь настроек в файл."""
     try:
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(settings, f, indent=4, ensure_ascii=False)

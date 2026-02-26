@@ -23,9 +23,7 @@ def _toggle_auto_update(dpg, camera_controller, enabled):
 def _camera_power_on(dpg, camera_controller):
     """Подключение ко всем устройствам камеры без их активации"""
     try:
-        print('Begin on')
         success, results = camera_controller.connect_and_initialize()
-        print(success, results)
         if success:
             dpg.set_value("status_text", "Устройства подключены")
             dpg.configure_item("status_text", color=[0, 255, 0])

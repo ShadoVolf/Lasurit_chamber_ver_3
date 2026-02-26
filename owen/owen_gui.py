@@ -19,7 +19,7 @@ from owen.correction_plot_dialog import show_correction_plot_dialog
 from owen.hold_time_dialog import show_hold_time_dialog
 from owen.pid_dialog import show_pid_dialog
 from owen.setpoint_dialog import show_setpoint_dialog
-
+from owen.algorithm_settings_dialog import _load_settings_from_file, _save_settings_to_file
 
 # Импорты вынесенных диалогов
 
@@ -237,7 +237,7 @@ class TPM12_GUI:
         self.user_setpoint_initialized = False  # флаг первой инициализации
         self.user_setpoint_manually_set = False
 
-        self.config_file = Path(__file__).parent / "chamber_algorithm_config.json"
+        #self.config_file = Path(__file__).parent / "chamber_algorithm_config.json"
         self.corrector_ch1: Optional[PolynomialCorrector] = None
         self.corrector_ch2: Optional[PolynomialCorrector] = None
         self.correction_file_ch1 = Path("tpm12_correction_ch1.pkl")
@@ -274,48 +274,18 @@ class TPM12_GUI:
 
     def _load_algorithm_config(self):
         """Загрузить настройки алгоритма из файла и применить их."""
-        if not self.config_file.exists():
-            # Значения по умолчанию (синхронизированы с algorithm_settings_dialog.py)
-            default_settings = {
-                "epsilon_reach": 0.2,
-                "epsilon_stable": 0.1,
-                "stability_interval": 5,
-                "pid_adjust_interval": 120,
-                "setpoint_adjust_interval": 200,
-                "update_interval": 1.0,
-                "heating_rate": 0.0,
-                "shaft_stabilization_interval": 2.0,
-                "shaft_max_attempts": 15,
-                "shaft_final_delay": 20.0,
-                "shaft_temp_update_interval": 60.0,
-                "target_gradient": 2.0,
-                "fan_adjust_interval": 30.0,
-                "temp_threshold_for_shaft_heating": 50.0,
-                "shaft_min_temp_for_heating": 20.0,
-                "shaft_heating_duration": 5.0,
-                "shaft_heating_repetitions": 3,
-                "shaft_heating_interval": 60.0,
-            }
-            self._apply_algorithm_settings(default_settings)
-            self._save_algorithm_config(default_settings)
+        if not self.chamber_process:
+            print("ChamberProcess не инициализирован, настройки не загружены")
             return
+        settings = _load_settings_from_file(self.chamber_process)
+        self._apply_algorithm_settings(settings)
 
-        try:
-            with open(self.config_file, 'r', encoding='utf-8') as f:
-                settings = json.load(f)
-            self._apply_algorithm_settings(settings)
-            print("Конфигурация алгоритма загружена")
-        except Exception as e:
-            print(f"Ошибка загрузки конфигурации: {e}")
+
 
     def _save_algorithm_config(self, settings):
         """Сохранить настройки алгоритма в файл."""
-        try:
-            with open(self.config_file, 'w', encoding='utf-8') as f:
-                json.dump(settings, f, indent=4, ensure_ascii=False)
-            print(f"Конфигурация сохранена в {self.config_file}")
-        except Exception as e:
-            print(f"Ошибка сохранения конфигурации: {e}")
+        _save_settings_to_file(settings)
+
 
     def _load_corrections(self):
         camera_controller = DEVICES_DATA.get_chamber_controller()

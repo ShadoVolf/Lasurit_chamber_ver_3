@@ -75,7 +75,6 @@ class CameraController:
         Returns:
             Tuple[bool, str]: (Успех создания, Сообщение об ошибке)
         """
-        print('Create', device_type)
         try:
             if device_type == DeviceType.TRM12:
                 params = self.devices_data.trm12
@@ -118,7 +117,6 @@ class CameraController:
                 return False, f"Неизвестный тип устройства: {device_type}"
 
         except Exception as e:
-            print(e)
             return False, f"Ошибка создания драйвера {device_type}: {e}"
 
     def _connect_device(self, device_type: DeviceType) -> Tuple[bool, str]:
@@ -166,7 +164,6 @@ class CameraController:
             return True, f"Успешно подключено к {device_type.value}"
 
         except Exception as e:
-            print('Error', e)
             return False, f"Ошибка подключения к {device_type.value}: {e}"
 
     def get_pid_parameters(self, channel: int = 0) -> Optional[Dict[str, Any]]:
@@ -760,36 +757,6 @@ class CameraController:
         except Exception as e:
             return None, f"Ошибка получения статуса двигателя: {e}"
 
-    def heat_pulse(self, duration: float = 5.0) -> Tuple[bool, str]:
-        """
-        Импульс нагрева - включить нагрев двигателя на заданное время
-
-        Args:
-            duration: Длительность импульса в секундах
-
-        Returns:
-            Tuple[bool, str]: (Успех, Сообщение)
-        """
-        try:
-            if not self.relay or not hasattr(self.relay, 'is_connected') or not self.relay.is_connected():
-                return False, "Релейная плата не подключена"
-
-            # Включаем нагрев
-            success, message = self.turn_on_motor_heating()
-            if not success:
-                return False, message
-
-            # Ждем указанное время
-            time.sleep(duration)
-
-            # Выключаем нагрев
-            success, message = self.turn_off_motor_heating()
-            return success, "Импульс нагрева выполнен" if success else message
-
-        except Exception as e:
-            # Пытаемся выключить нагрев в любом случае
-            self.turn_off_motor_heating()
-            return False, f"Ошибка импульса нагрева: {e}"
 
     def emergency_stop(self) -> Tuple[bool, str]:
         """
