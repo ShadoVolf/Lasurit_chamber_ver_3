@@ -499,6 +499,8 @@ class TPM12_GUI:
             "shaft_heating_duration": self.chamber_process.shaft_heating_duration,
             "shaft_heating_repetitions": self.chamber_process.shaft_heating_repetitions,
             "shaft_heating_interval": self.chamber_process.shaft_heating_interval,
+            "fan_control_enabled": self.chamber_process.fan_control_enabled,
+            "shaft_check_enabled": self.chamber_process.shaft_check_enabled,
         }
 
         show_algorithm_settings_dialog(

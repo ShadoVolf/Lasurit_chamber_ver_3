@@ -75,6 +75,9 @@ class ChamberProcess:
         self.program: Optional[TemperatureProgram] = None
         self.current_step_index: int = -1
 
+        self.fan_control_enabled = True
+        self.shaft_check_enabled = True
+
     def start_program(self, program: TemperatureProgram):
         """Запуск многоступенчатой программы."""
         if self.is_running():
@@ -193,6 +196,8 @@ class ChamberProcess:
         if self.shaft_heating_active:
             # Если серия уже идёт, не инициируем новую проверку
             return
+        if not self.shaft_check_enabled:
+            return
 
         now = time.time()
         # Проверяем, наступило ли время для нового измерения
@@ -242,6 +247,8 @@ class ChamberProcess:
         Вызывается на каждой итерации основного цикла.
         """
         if not self.shaft_heating_active:
+            return
+        if not self.shaft_check_enabled:
             return
 
         now = time.time()
@@ -339,10 +346,19 @@ class ChamberProcess:
             shaft_params["temp_update_interval"] = params["shaft_temp_update_interval"]
         if shaft_params:
             self.update_shaft_params(**shaft_params)
+        if "fan_control_enabled" in params:
+            self.fan_control_enabled = params["fan_control_enabled"]
+        if "shaft_check_enabled" in params:
+            self.shaft_check_enabled = params["shaft_check_enabled"]
+            # При отключении проверки вала сбрасываем активный нагрев
+            if not self.shaft_check_enabled:
+                self._reset_shaft_heating()
 
     def _adjust_fan_speed(self):
         """Корректирует скорость вентилятора на основе модуля текущего градиента."""
         if not self.camera:
+            return
+        if not self.fan_control_enabled:
             return
 
         grad, msg = self.camera.get_gradient()

@@ -46,6 +46,9 @@ def _load_settings_from_file(chamber_process):
         "shaft_heating_duration": 5.0,
         "shaft_heating_repetitions": 3,
         "shaft_heating_interval": 60.0,
+        "fan_control_enabled": True,
+        "shaft_check_enabled": True,
+
     }
 
     config_path = CONFIG_FILE  # используем переменную
@@ -202,6 +205,8 @@ def _create_input_fields(dpg_instance, parent_tag, base_tag, current_settings, t
         ("shaft_heating_duration", "Длительность нагрева вала (сек)", "float", 0.5, 0.1, 600),
         ("shaft_heating_repetitions", "Количество повторений нагрева", "int", 1, 0, 100),
         ("shaft_heating_interval", "Интервал между повторениями (сек)", "float", 1, 1, 3600),
+        ("fan_control_enabled", "Регулировка вентилятора", "bool", None, None, None),
+        ("shaft_check_enabled", "Проверка температуры вала", "bool", None, None, None)
     ]
 
     with dpg_instance.table(
@@ -232,7 +237,7 @@ def _create_input_fields(dpg_instance, parent_tag, base_tag, current_settings, t
                     )
                     if dpg_instance.does_item_exist(f"{tag_prefix}_input_theme"):
                         dpg_instance.bind_item_theme(item, f"{tag_prefix}_input_theme")
-                else:  # float
+                elif typ == "float":
                     item = dpg_instance.add_input_float(
                         tag=f"{base_tag}_{key}",
                         default_value=float(value),
@@ -242,6 +247,11 @@ def _create_input_fields(dpg_instance, parent_tag, base_tag, current_settings, t
                         format="%.2f",
                         width=150
                     )
+                elif typ == "bool":
+                    item = dpg_instance.add_checkbox(
+                     tag=f"{base_tag}_{key}",
+                    default_value=bool(value)
+                     )
                     if dpg_instance.does_item_exist(f"{tag_prefix}_input_float_theme"):
                         dpg_instance.bind_item_theme(item, f"{tag_prefix}_input_float_theme")
 
@@ -270,6 +280,8 @@ def _set_default_values(dpg_instance, base_tag, chamber_process):
         "shaft_heating_duration": 5.0,
         "shaft_heating_repetitions": 3,
         "shaft_heating_interval": 60.0,
+        "fan_control_enabled": True,
+        "shaft_check_enabled": True,
     }
     for key, value in defaults.items():
         tag = f"{base_tag}_{key}"
@@ -295,6 +307,8 @@ def _apply_and_close_1(dpg_instance, base_tag, apply_callback):
         "shaft_heating_duration",
         "shaft_heating_repetitions",
         "shaft_heating_interval",
+        "fan_control_enabled",
+        "shaft_check_enabled",
     ]
     for key in keys:
         tag = f"{base_tag}_{key}"
