@@ -78,6 +78,30 @@ class ChamberProcess:
         self.fan_control_enabled = True
         self.shaft_check_enabled = True
 
+        self._last_fan_ensure_time = 0
+        self.FAN_ENSURE_INTERVAL = 5  # проверять не чаще чем раз в 5 секунд
+
+    def _ensure_fan_running(self):
+        """Проверяет, работает ли вентилятор, и перезапускает при остановке."""
+        if not self.is_running() or not self.fan_control_enabled:
+            return
+
+        now = time.time()
+        if now - self._last_fan_ensure_time < self.FAN_ENSURE_INTERVAL:
+            return
+        self._last_fan_ensure_time = now
+
+        # Проверяем состояние двигателя
+        if self.camera.blsd20 and self.camera.blsd20.connected:
+            status = self.camera.blsd20.get_status()
+            if status == self.camera.blsd20.MotorStatus.STOPPED:
+                self._log("ВНИМАНИЕ: вентилятор остановлен. Выполняется повторный запуск...")
+                # Убедимся, что скорость установлена
+                self.camera.blsd20.set_speed(self.current_fan_speed)
+                self.camera.blsd20.start_motor()
+                self._log(f"Вентилятор перезапущен со скоростью {self.current_fan_speed} об/мин")
+
+
     def start_program(self, program: TemperatureProgram):
         """Запуск многоступенчатой программы."""
         if self.is_running():
@@ -529,6 +553,7 @@ class ChamberProcess:
             self._manage_shaft_heating_series()
 
             self._update_data(**sensors)
+            self._ensure_fan_running()
             current = sensors['current_temp']
             diff = abs(current - target)
             self._log(f"НАГРЕВ: T={current:.2f}°C, цель={target:.2f}°C, разница={diff:.2f}°C")
@@ -554,6 +579,7 @@ class ChamberProcess:
             sensors = self._read_sensors()
             current = sensors['current_temp']
             self._update_data(**sensors)
+            self._ensure_fan_running()
             # Управление нагревом вала
             self._check_and_heat_shaft(current)
             self._manage_shaft_heating_series()
@@ -623,6 +649,7 @@ class ChamberProcess:
             sensors = self._read_sensors()
             current = sensors['current_temp']
             self._update_data(**sensors, hold_remaining=remaining)
+            self._ensure_fan_running()
             # Управление нагревом вала
             self._check_and_heat_shaft(current)
             self._manage_shaft_heating_series()

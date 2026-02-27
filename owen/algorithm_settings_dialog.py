@@ -289,36 +289,6 @@ def _set_default_values(dpg_instance, base_tag, chamber_process):
             dpg_instance.set_value(tag, value)
 
 
-def _apply_and_close_1(dpg_instance, base_tag, apply_callback):
-    """Собирает значения из полей, вызывает callback и закрывает окно."""
-    new_settings = {}
-    keys = [
-        "epsilon_reach", "epsilon_stable", "stability_interval",
-        "pid_adjust_interval", "setpoint_adjust_interval",
-        "update_interval", "heating_rate",
-        "shaft_stabilization_interval", "shaft_final_delay",
-        "shaft_temp_update_interval", "shaft_max_attempts",
-        # Новые ключи
-        "max_correction", "correction_cooldown",
-        "target_gradient",
-        "fan_adjust_interval",
-        "temp_threshold_for_shaft_heating",
-        "shaft_min_temp_for_heating",
-        "shaft_heating_duration",
-        "shaft_heating_repetitions",
-        "shaft_heating_interval",
-        "fan_control_enabled",
-        "shaft_check_enabled",
-    ]
-    for key in keys:
-        tag = f"{base_tag}_{key}"
-        if dpg_instance.does_item_exist(tag):
-            new_settings[key] = dpg_instance.get_value(tag)
-        else:
-            new_settings[key] = None
-
-    apply_callback(new_settings)
-    dpg_instance.delete_item(base_tag)
 
 def _apply_and_close(dpg_instance, base_tag, apply_callback):
     """Собирает значения из полей, вызывает callback и сохраняет в файл."""
@@ -337,6 +307,8 @@ def _apply_and_close(dpg_instance, base_tag, apply_callback):
         "shaft_heating_duration",
         "shaft_heating_repetitions",
         "shaft_heating_interval",
+        "fan_control_enabled",  # <-- добавить
+        "shaft_check_enabled",
     ]
     for key in keys:
         tag = f"{base_tag}_{key}"
