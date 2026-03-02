@@ -86,6 +86,10 @@ class ChamberProcess:
         self._shaft_heating_repetitions_current = self.shaft_heating_repetitions
         self._shaft_heating_interval_current = self.shaft_heating_interval
 
+        self._program_file: Optional[str] = None  # путь к файлу программы (если запущена из файла)
+        self.auto_apply_pid: bool = True  # брать из конфига
+        self._temp_pid_file = "temp_pid.json"  # файл для ручного режима
+
     def _ensure_fan_running(self):
         """Проверяет, работает ли вентилятор, и перезапускает при остановке."""
         if not self.is_running() or not self.fan_control_enabled:
@@ -107,7 +111,7 @@ class ChamberProcess:
                 self._log(f"Вентилятор перезапущен со скоростью {self.current_fan_speed} об/мин")
 
 
-    def start_program(self, program: TemperatureProgram):
+    def start_program_1(self, program: TemperatureProgram):
         """Запуск многоступенчатой программы."""
         if self.is_running():
             raise RuntimeError("Процесс уже запущен")
@@ -132,7 +136,102 @@ class ChamberProcess:
         self._thread = threading.Thread(target=self._program_loop, daemon=True)
         self._thread.start()
 
-    def _program_loop(self):
+    def start_program(self, program: TemperatureProgram, program_file: Optional[str] = None):
+        """Запуск программы с возможным путём к файлу."""
+        if self.is_running():
+            raise RuntimeError("Процесс уже запущен")
+        self._program = program
+        self._program_file = program_file
+        self.current_step_index = 0
+        self._stop_event.clear()
+
+        self.apply_preset()
+        self.current_fan_speed = 1000
+        self.camera.set_fan_speed(1000)
+        first_step = program.steps[0]
+        self.camera.set_temperature(first_step['temperature'], channel=0)
+        self.camera.turn_on_camera()
+        self._log(f"Запуск программы из {len(program.steps)} ступеней")
+        self._thread = threading.Thread(target=self._program_loop, daemon=True)
+        self._thread.start()
+
+    def _apply_pid_for_target(self, target_temp: float):
+        """Загрузить PID из temp_pid.json для целевой температуры и применить."""
+        if not os.path.exists(self._temp_pid_file):
+            return
+        try:
+            with open(self._temp_pid_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            # ключ – температура как строка (чтобы избежать проблем с float)
+            key = str(target_temp)
+            if key in data:
+                pid = data[key]
+                self.camera.set_pid_parameters(
+                    P=pid.get('p'),
+                    I=pid.get('i'),
+                    D=pid.get('d'),
+                    channel=0
+                )
+                self._log(
+                    f"Применены сохранённые PID для температуры {target_temp}°C: P={pid['p']}, I={pid['i']}, D={pid['d']}")
+        except Exception as e:
+            self._log(f"Ошибка загрузки PID из файла: {e}")
+
+    def _apply_pid_from_step(self, step: dict):
+        """Применить PID из ступени программы, если они есть и включена авто-применение."""
+        if not self.auto_apply_pid:
+            return
+        p = step.get('pid_p')
+        i = step.get('pid_i')
+        d = step.get('pid_d')
+        if p is not None and i is not None and d is not None:
+            self.camera.set_pid_parameters(P=p, I=i, D=d, channel=0)
+            self._log(f"Применены PID из ступени: P={p}, I={i}, D={d}")
+
+    def _save_current_pid(self):
+        """Сохранить текущие PID в зависимости от контекста."""
+        pid = self.camera.get_pid_parameters(channel=0)
+        if not pid:
+            return
+        p = pid.get('P')
+        i = pid.get('I')
+        d = pid.get('D')
+        if p is None or i is None or d is None:
+            return
+
+        if self._program is None:
+            # Ручной режим – сохраняем в temp_pid.json
+            self._save_pid_to_temp_file(self._target_temp, p, i, d)
+        elif self._program_file is not None:
+            # Программа из файла – обновляем ступень в памяти
+            if 0 <= self.current_step_index < len(self._program.steps):
+                self._program.update_step_pid(self.current_step_index, p, i, d)
+                self._log(f"PID ступени {self.current_step_index + 1} обновлены в памяти")
+        # Если программа временная (без файла) – ничего не сохраняем
+
+    def _save_pid_to_temp_file(self, target: float, p: float, i: int, d: int):
+        """Сохранить PID для ручного режима в temp_pid.json (замена по ключу)."""
+        try:
+            data = {}
+            if os.path.exists(self._temp_pid_file):
+                with open(self._temp_pid_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            key = str(round(target, 1))  # ключ – температура с одним знаком
+            data[key] = {
+                'p': p,
+                'i': i,
+                'd': d,
+                'timestamp': time.time()
+            }
+            with open(self._temp_pid_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            self._log(f"PID для температуры {target}°C сохранены в {self._temp_pid_file}")
+        except Exception as e:
+            self._log(f"Ошибка сохранения PID в файл: {e}")
+
+
+
+    def _program_loop_1(self):
         """Цикл выполнения многоступенчатой программы."""
         try:
             for idx, step in enumerate(self.program.steps):
@@ -178,6 +277,56 @@ class ChamberProcess:
 
             else:
                 # Цикл завершился без break – все ступени выполнены
+                self._update_data(process_status=ProcessStatus.COMPLETED)
+                self._log("Программа успешно завершена")
+        except Exception as e:
+            self._log(f"Ошибка в цикле программы: {e}")
+            self._update_data(process_status=ProcessStatus.ERROR)
+        finally:
+            self.camera.turn_off_camera()
+
+    def _program_loop(self):
+        """Цикл выполнения программы с применением PID на каждой ступени."""
+        try:
+            for idx, step in enumerate(self._program.steps):
+                if self._stop_event.is_set():
+                    break
+                self.current_step_index = idx
+                target = step['temperature']
+                rate = step['rate']
+                hold = step['hold_time'] * 60
+
+                # Применить PID из ступени, если есть
+                self._apply_pid_from_step(step)
+
+                self._log(f"Ступень {idx + 1}: цель {target}°C, скорость {rate}°C/мин, выдержка {hold / 60} мин")
+                # Установка скорости нагрева
+                current_rate = self.get_heating_rate()
+                if abs(current_rate - rate) > 0.01:
+                    self.set_heating_rate(rate)
+
+                self.camera.set_temperature(target, channel=0)
+                self._current_setpoint = target
+                self._update_data(current_setpoint=target, target_temp=target, process_status=ProcessStatus.HEATING)
+
+                if not self._wait_for_target(target):
+                    self._update_data(process_status=ProcessStatus.ERROR)
+                    break
+
+                self._update_data(process_status=ProcessStatus.STABILIZING)
+                if not self._stabilize_temperature(target):
+                    self._update_data(process_status=ProcessStatus.ERROR)
+                    break
+
+                # После стабилизации сохраняем PID (если нужно)
+                self._save_current_pid()
+
+                self._update_data(process_status=ProcessStatus.HOLDING)
+                self._hold_temperature(target, hold)
+
+                if self._stop_event.is_set():
+                    break
+            else:
                 self._update_data(process_status=ProcessStatus.COMPLETED)
                 self._log("Программа успешно завершена")
         except Exception as e:
@@ -436,6 +585,9 @@ class ChamberProcess:
         if "shaft_heating_interval" in params:
             self.shaft_heating_interval = params["shaft_heating_interval"]
             self._shaft_heating_interval_current = self.shaft_heating_interval
+        if "auto_apply_pid" in params:
+            self.auto_apply_pid = params["auto_apply_pid"]
+
 
     def _adjust_fan_speed(self):
         """Корректирует скорость вентилятора на основе модуля текущего градиента."""
@@ -497,6 +649,28 @@ class ChamberProcess:
         return self._thread is not None and self._thread.is_alive()
 
     def start_process(self, target_temp: float, hold_minutes: float):
+        """Запуск ручного режима (одна цель)."""
+        if self.is_running():
+            raise RuntimeError("Процесс уже запущен")
+        self._program = None
+        self._program_file = None
+        self._target_temp = target_temp
+        self._hold_minutes = hold_minutes
+        self._stop_event.clear()
+
+        # Применить PID из файла, если включена авто-применение
+        if self.auto_apply_pid:
+            self._apply_pid_for_target(target_temp)
+
+        self._log(f"Запуск ручного режима: цель {target_temp}°C, выдержка {hold_minutes} мин")
+        self.camera.set_temperature(target_temp, channel=0)
+        self.camera.turn_on_camera()
+        self.current_fan_speed = 1000
+        self.camera.set_fan_speed(1000)
+        self._thread = threading.Thread(target=self._process_loop, daemon=True)
+        self._thread.start()
+
+    def start_process_1(self, target_temp: float, hold_minutes: float):
         """Запуск процесса нагрева и выдержки"""
         if self.is_running():
             raise RuntimeError("Процесс уже запущен")
@@ -870,7 +1044,7 @@ class ChamberProcess:
 
         # Сохраняем результаты
         self._save_stabilization_results(target)
-
+        self._save_current_pid()
         return True
 
     def _wait_for_stabilization(self, timeout: float = 1800) -> bool:

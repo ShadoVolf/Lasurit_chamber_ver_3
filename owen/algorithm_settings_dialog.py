@@ -48,6 +48,7 @@ def _load_settings_from_file(chamber_process):
         "shaft_heating_interval": 60.0,
         "fan_control_enabled": True,
         "shaft_check_enabled": True,
+        "auto_apply_pid": True,
 
     }
 
@@ -206,7 +207,8 @@ def _create_input_fields(dpg_instance, parent_tag, base_tag, current_settings, t
         ("shaft_heating_repetitions", "Количество повторений нагрева", "int", 1, 0, 100),
         ("shaft_heating_interval", "Интервал между повторениями (сек)", "float", 1, 1, 3600),
         ("fan_control_enabled", "Регулировка вентилятора", "bool", None, None, None),
-        ("shaft_check_enabled", "Проверка температуры вала", "bool", None, None, None)
+        ("shaft_check_enabled", "Проверка температуры вала", "bool", None, None, None),
+        ("auto_apply_pid", "Автоприменение PID", "bool", None, None, None),
     ]
 
     with dpg_instance.table(
@@ -282,6 +284,7 @@ def _set_default_values(dpg_instance, base_tag, chamber_process):
         "shaft_heating_interval": 60.0,
         "fan_control_enabled": True,
         "shaft_check_enabled": True,
+        "auto_apply_pid": True,
     }
     for key, value in defaults.items():
         tag = f"{base_tag}_{key}"
@@ -309,6 +312,7 @@ def _apply_and_close(dpg_instance, base_tag, apply_callback):
         "shaft_heating_interval",
         "fan_control_enabled",  # <-- добавить
         "shaft_check_enabled",
+        "auto_apply_pid",
     ]
     for key in keys:
         tag = f"{base_tag}_{key}"

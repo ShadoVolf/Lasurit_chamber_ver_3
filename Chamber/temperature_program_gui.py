@@ -7,6 +7,7 @@ from typing import Optional
 from Chamber.temperature_program import TemperatureProgram
 from Chamber.chamber_process import ChamberProcess
 from Ports_COM.Devices_Data import DEVICES_DATA
+from owen.pid_viewer_dialog import show_pid_viewer_dialog
 
 
 class TemperatureProgramGUI:
@@ -126,6 +127,8 @@ class TemperatureProgramGUI:
                 self.status_label = dpg.add_text("Статус: Готов", tag=self.status_text_tag)
                 dpg.add_spacer(width=10)
                 self.step_label = dpg.add_text("Ступеней: 0", tag=self.step_counter_tag)
+                pid_view_btn = dpg.add_button(label="Просмотр PID", width=100, callback=self._open_pid_viewer)
+                dpg.bind_item_theme(pid_view_btn, f"{self.tag}_button_theme")
 
             dpg.add_spacer(height=10)
 
@@ -201,6 +204,11 @@ class TemperatureProgramGUI:
         self._refresh_table()
         # Запуск цикла обновления подсветки текущей ступени
         dpg.set_frame_callback(dpg.get_frame_count() + 10, self._update_ui_callback)
+
+    def _open_pid_viewer(self):
+        """Открыть окно просмотра/редактирования PID."""
+        # Импортируем функцию из нового модуля
+        show_pid_viewer_dialog(dpg, self.tag, self.chamber_process)
 
     def _delete_last_step(self):
         """Удалить последнюю ступень из программы."""
@@ -459,6 +467,29 @@ class TemperatureProgramGUI:
         dpg.set_value(self.status_text_tag, f"Загружено {os.path.basename(path)}")
 
     def _start_program(self):
+        if not self.chamber_process:
+            dpg.set_value(self.status_text_tag, "Ошибка: процесс камеры не инициализирован")
+            return
+        if len(self.program.steps) == 0:
+            dpg.set_value(self.status_text_tag, "Нет ступеней для выполнения")
+            return
+        if self.chamber_process.is_running():
+            dpg.set_value(self.status_text_tag, "Процесс уже запущен")
+            return
+
+        motor_gui = DEVICES_DATA.get_blsd_gui()
+        if motor_gui:
+            motor_gui.start_time = time.time()
+            motor_gui.unfreeze_time()
+
+        # Передаём путь к файлу, если программа загружена из файла, иначе None
+        program_file = self.program.filename if hasattr(self.program, 'filename') else None
+        self.chamber_process.start_program(self.program, program_file)
+        self.is_running = True
+        dpg.set_value(self.status_text_tag, "Программа запущена")
+        self._set_editable(False)
+
+    def _start_program_1(self):
         """Запустить выполнение программы."""
         self._sync_steps_from_ui()
         if not self.chamber_process:
