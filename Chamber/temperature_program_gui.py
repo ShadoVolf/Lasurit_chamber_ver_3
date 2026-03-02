@@ -223,7 +223,7 @@ class TemperatureProgramGUI:
             if dpg.does_item_exist(hold_tag):
                 self.program.steps[i]['hold_time'] = round(dpg.get_value(hold_tag), 1)
 
-    def _add_table_row(self, index: int, temperature: float, rate: float, hold_time: float):
+    def _add_table_row_1(self, index: int, temperature: float, rate: float, hold_time: float):
         row_tag = f"{self.tag}_row_{index}"
         with dpg.table_row(parent=self.table_tag, tag=row_tag):
             dpg.add_text(str(index + 1))
@@ -243,6 +243,40 @@ class TemperatureProgramGUI:
             dpg.bind_item_theme(hold_input, f"{self.tag}_input_float_theme")
             dpg.set_item_callback(hold_input, lambda s, a, idx=index: self._update_step(idx, 'hold_time', a))
         self._apply_row_theme(index)
+
+    def _add_table_row(self, index: int, temperature: float, rate: float, hold_time: float):
+        row_tag = f"{self.tag}_row_{index}"
+        with dpg.table_row(parent=self.table_tag, tag=row_tag):
+            dpg.add_text(str(index + 1))
+            # Температура
+            temp_input = dpg.add_input_float(default_value=temperature, step=0.1, width=100, format="%.1f",
+                                             tag=f"{self.tag}_temp_{index}")
+            dpg.bind_item_theme(temp_input, f"{self.tag}_input_float_theme")
+            dpg.set_item_user_data(temp_input, (index, 'temperature'))
+            dpg.set_item_callback(temp_input, self._update_step_callback)
+            # Скорость
+            rate_input = dpg.add_input_float(default_value=rate, step=0.1, width=100, format="%.1f",
+                                             tag=f"{self.tag}_rate_{index}")
+            dpg.bind_item_theme(rate_input, f"{self.tag}_input_float_theme")
+            dpg.set_item_user_data(rate_input, (index, 'rate'))
+            dpg.set_item_callback(rate_input, self._update_step_callback)
+            # Выдержка
+            hold_input = dpg.add_input_float(default_value=hold_time, step=0.1, width=100, format="%.1f",
+                                             tag=f"{self.tag}_hold_{index}")
+            dpg.bind_item_theme(hold_input, f"{self.tag}_input_float_theme")
+            dpg.set_item_user_data(hold_input, (index, 'hold_time'))
+            dpg.set_item_callback(hold_input, self._update_step_callback)
+        self._apply_row_theme(index)
+
+    def _update_step_callback(self, sender, app_data):
+        """Обработчик изменений полей ввода, извлекает user_data из отправителя."""
+        user_data = dpg.get_item_user_data(sender)
+        if user_data is None:
+            return
+        index, field = user_data
+        if app_data is None:
+            return
+        self._update_step(index, field, app_data)
 
     def _refresh_table(self):
         """Обновить отображение таблицы в соответствии с self.program.steps."""
@@ -269,10 +303,26 @@ class TemperatureProgramGUI:
             theme = f"{self.tag}_row_theme" if index % 2 == 0 else f"{self.tag}_row_alt_theme"
             dpg.bind_item_theme(row_tag, theme)
 
-    def _update_step(self, index: int, field: str, value: float):
+    def _update_step_1(self, index: int, field: str, value: float):
         """Обновить значение ступени в программе."""
         if 0 <= index < len(self.program.steps):
             self.program.steps[index][field] = round(value, 1)
+
+    def _update_step(self, index: int, field: str, value):
+        """Обновить значение ступени в программе с проверками."""
+        # Проверка, что steps существует и является списком
+        if not hasattr(self.program, 'steps') or not isinstance(self.program.steps, list):
+            return
+        # Проверка, что index целое число и в допустимом диапазоне
+        if not isinstance(index, int) or index < 0 or index >= len(self.program.steps):
+            return
+        # Преобразование value в число, если возможно
+        try:
+            num_value = float(value)
+        except (TypeError, ValueError):
+            return
+        # Обновление значения
+        self.program.steps[index][field] = round(num_value, 1)
 
     def _select_row(self, index: int):
         """Выбрать строку как текущую."""
