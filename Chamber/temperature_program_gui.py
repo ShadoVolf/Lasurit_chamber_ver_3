@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import dearpygui.dearpygui as dpg
 from typing import Optional
@@ -210,6 +211,18 @@ class TemperatureProgramGUI:
         else:
             dpg.set_value(self.status_text_tag, "Нет ступеней для удаления")
 
+    def _sync_steps_from_ui(self):
+        for i in range(len(self.program.steps)):
+            temp_tag = f"{self.tag}_temp_{i}"
+            rate_tag = f"{self.tag}_rate_{i}"
+            hold_tag = f"{self.tag}_hold_{i}"
+            if dpg.does_item_exist(temp_tag):
+                self.program.steps[i]['temperature'] = round(dpg.get_value(temp_tag), 1)
+            if dpg.does_item_exist(rate_tag):
+                self.program.steps[i]['rate'] = round(dpg.get_value(rate_tag), 1)
+            if dpg.does_item_exist(hold_tag):
+                self.program.steps[i]['hold_time'] = round(dpg.get_value(hold_tag), 1)
+
     def _add_table_row(self, index: int, temperature: float, rate: float, hold_time: float):
         row_tag = f"{self.tag}_row_{index}"
         with dpg.table_row(parent=self.table_tag, tag=row_tag):
@@ -317,7 +330,11 @@ class TemperatureProgramGUI:
 
     def _save_program(self):
         """Вызвать диалог сохранения файла."""
+        '''
         setups_dir = os.path.join(os.path.dirname(__file__), "..", "setups")
+        os.makedirs(setups_dir, exist_ok=True)
+        '''
+        setups_dir = self._get_setups_dir()
         os.makedirs(setups_dir, exist_ok=True)
 
         dialog_tag = f"{self.tag}_save_dialog"
@@ -339,6 +356,7 @@ class TemperatureProgramGUI:
         dpg.show_item(dialog_tag)
 
     def _save_file_callback(self, sender, app_data):
+        self._sync_steps_from_ui()
         if 'file_path_name' in app_data:
             path = app_data['file_path_name']
         elif 'selections' in app_data:
@@ -350,7 +368,12 @@ class TemperatureProgramGUI:
 
     def _load_program(self):
         """Вызвать диалог загрузки файла."""
+        '''
         setups_dir = os.path.join(os.path.dirname(__file__), "..", "setups")
+        d
+        '''
+        setups_dir = self._get_setups_dir()
+        os.makedirs(setups_dir, exist_ok=True)
         dialog_tag = f"{self.tag}_load_dialog"
         if dpg.does_item_exist(dialog_tag):
             dpg.delete_item(dialog_tag)
@@ -380,6 +403,7 @@ class TemperatureProgramGUI:
 
     def _start_program(self):
         """Запустить выполнение программы."""
+        self._sync_steps_from_ui()
         if not self.chamber_process:
             dpg.set_value(self.status_text_tag, "Ошибка: процесс камеры не инициализирован")
             return
@@ -438,6 +462,14 @@ class TemperatureProgramGUI:
         if dpg.does_item_exist(self.window_tag):
             dpg.delete_item(self.window_tag)
 
+    def _get_setups_dir(self):
+        if getattr(sys, 'frozen', False):
+            base = os.path.dirname(sys.executable)
+        else:
+            # В режиме разработки поднимаемся на уровень выше, чтобы папка setups была рядом с исходниками
+            base = os.path.dirname(os.path.dirname(__file__))
+        return os.path.join(base, "setups")
+
 
 def show_temperature_program(dpg):
     """Функция для вызова из главного меню."""
@@ -446,3 +478,4 @@ def show_temperature_program(dpg):
     chamber_process = owen_gui.chamber_process if owen_gui else None
     gui = TemperatureProgramGUI(chamber_process)
     gui.create_window()
+
