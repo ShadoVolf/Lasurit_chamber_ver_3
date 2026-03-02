@@ -341,8 +341,15 @@ class TemperatureProgramGUI:
             self._delete_row(self.program.current_index)
 
     def _add_row(self):
-        """Добавить пустую строку (со значениями по умолчанию)."""
-        self.program.add_step(25.0, 5.0, 10.0)
+        if self.program.steps:
+            last = self.program.steps[-1]
+            temp, rate, hold = last['temperature'], last['rate'], last['hold_time']
+        else:
+            # Если ступеней нет, берём значения из полей быстрого создания
+            temp = dpg.get_value(self.start_temp)
+            rate = dpg.get_value(self.rate)
+            hold = dpg.get_value(self.hold_time)
+        self.program.add_step(temp, rate, hold)
         self._refresh_table()
 
     def _generate_table(self):

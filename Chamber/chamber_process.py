@@ -83,6 +83,9 @@ class ChamberProcess:
         self._last_fan_ensure_time = 0
         self.FAN_ENSURE_INTERVAL = 5  # проверять не чаще чем раз в 5 секунд
 
+        self._shaft_heating_repetitions_current = self.shaft_heating_repetitions
+        self._shaft_heating_interval_current = self.shaft_heating_interval
+
     def _ensure_fan_running(self):
         """Проверяет, работает ли вентилятор, и перезапускает при остановке."""
         if not self.is_running() or not self.fan_control_enabled:
@@ -257,7 +260,16 @@ class ChamberProcess:
         if shaft_temp >= self.shaft_min_temp_for_heating:
             # Температура вала достаточна – ничего не делаем
             return
-
+        if shaft_temp < self.shaft_min_temp_for_heating:
+            # Коррекция параметров в зависимости от температуры камеры (база -60°C)
+            # На каждые 10°C выше -60 уменьшаем repetitions на 1 и увеличиваем interval на 1 с
+            base_temp = -60.0
+            delta = current_temp - base_temp
+            steps = int(delta // 10) if delta > 0 else 0
+            self._shaft_heating_repetitions_current = max(1, self.shaft_heating_repetitions - steps)
+            self._shaft_heating_interval_current = self.shaft_heating_interval + steps
+            self._log(
+                f"Коррекция нагрева вала: repetitions={self._shaft_heating_repetitions_current}, interval={self._shaft_heating_interval_current}с")
         # Запускаем серию нагревов
         self._log(f"Температура вала {shaft_temp:.1f}°C ниже порога {self.shaft_min_temp_for_heating}°C. "
                   f"Запуск серии нагревов ({self.shaft_heating_repetitions} циклов по {self.shaft_heating_duration} сек, "
@@ -269,6 +281,44 @@ class ChamberProcess:
         self.camera.turn_on_motor_heating()
 
     def _manage_shaft_heating_series(self):
+        """
+        Управляет фазами текущей серии нагревов (включение/пауза).
+        Вызывается на каждой итерации основного цикла.
+        """
+        if not self.shaft_heating_active:
+            return
+        if not self.shaft_check_enabled:
+            return
+
+        now = time.time()
+
+        if self.shaft_heating_phase == "heating":
+            if now >= self.shaft_phase_end_time:
+                # Завершаем текущий нагрев
+                self.camera.turn_off_motor_heating()
+                self.shaft_heating_cycles_left -= 1
+                if self.shaft_heating_cycles_left > 0:
+                    # Переходим в паузу
+                    self.shaft_heating_phase = "pause"
+                    self.shaft_phase_end_time = now + self._shaft_heating_interval_current
+                    self._log(f"Нагрев вала завершён, пауза {self._shaft_heating_interval_current} сек "
+                              f"(осталось {self.shaft_heating_cycles_left} циклов)")
+                else:
+                    # Серия завершена
+                    self.shaft_heating_active = False
+                    self.shaft_heating_phase = None
+                    self.shaft_heating_cycles_left = 0
+                    self._log("Серия нагревов вала полностью завершена")
+
+        elif self.shaft_heating_phase == "pause":
+            if now >= self.shaft_phase_end_time:
+                # Завершаем паузу, начинаем следующий нагрев
+                self.shaft_heating_phase = "heating"
+                self.shaft_phase_end_time = now + self.shaft_heating_duration
+                self.camera.turn_on_motor_heating()
+                self._log(f"Пауза завершена, следующий нагрев на {self.shaft_heating_duration} сек")
+
+    def _manage_shaft_heating_series_1(self):
         """
         Управляет фазами текущей серии нагревов (включение/пауза).
         Вызывается на каждой итерации основного цикла.
@@ -380,6 +430,12 @@ class ChamberProcess:
             # При отключении проверки вала сбрасываем активный нагрев
             if not self.shaft_check_enabled:
                 self._reset_shaft_heating()
+        if "shaft_heating_repetitions" in params:
+            self.shaft_heating_repetitions = int(params["shaft_heating_repetitions"])
+            self._shaft_heating_repetitions_current = self.shaft_heating_repetitions
+        if "shaft_heating_interval" in params:
+            self.shaft_heating_interval = params["shaft_heating_interval"]
+            self._shaft_heating_interval_current = self.shaft_heating_interval
 
     def _adjust_fan_speed(self):
         """Корректирует скорость вентилятора на основе модуля текущего градиента."""
@@ -639,7 +695,11 @@ class ChamberProcess:
                 else:
                     self._log("I достигло минимума, начинаем коррекцию уставки.")
 
-                    # --- Шаг 4: Коррекция уставки прибора ---э
+                    # --- Шаг 4: Коррекция уставки прибора ---
+                    if not self._correct_setpoint_stepwise(target, current_temp):
+                        self._log("Не удалось достичь допуска после коррекции уставки")
+                        return False
+                    '''
                     if self._current_setpoint is None:  # <-- ЗАЩИТА
                         self._current_setpoint = target
                         self._log(f"Предупреждение: _current_setpoint был None, установлен в {target}")
@@ -672,12 +732,50 @@ class ChamberProcess:
                     else:
                         self._log("Не удалось достичь допуска после всех коррекций")
                         return False
-
+                    '''
         # --- Шаг 5: Дополнительная стабилизация после достижения допуска ---
         self._log("Ожидание финальной стабилизации перед регулировкой вентилятора")
         if not self._wait_for_stabilization(timeout=600):
             self._log("Ошибка финальной стабилизации")
             return False
+
+        # --- Шаг 5.5: Предварительная корректировка скорости вентилятора ---
+        if self.fan_control_enabled and self.current_fan_speed < 2500:
+            self._log("Предварительная корректировка: увеличиваем скорость на 1000 об/мин")
+            old_speed = self.current_fan_speed
+            new_speed = old_speed + 1000
+            success, msg = self.camera.set_fan_speed(new_speed)
+            if success:
+                self.current_fan_speed = new_speed
+                # Ждём стабилизации
+                if self._wait_for_stabilization(timeout=600):
+                    grad_before = None
+                    grad_after = None
+                    # Измеряем градиент до изменения (старое значение уже было)
+                    grad_before, _ = self.camera.get_gradient()
+                    # Измеряем после
+                    grad_after, _ = self.camera.get_gradient()
+                    if grad_before is not None and grad_after is not None:
+                        delta_grad = abs(grad_after - grad_before)
+                        self._log(f"Изменение градиента после увеличения скорости: {delta_grad:.2f}°C")
+                        if delta_grad <= 0.2:
+                            self._log("Изменение незначительное, возвращаем исходную скорость и пропускаем подбор")
+                            # Возвращаем старую скорость
+                            self.camera.set_fan_speed(old_speed)
+                            self.current_fan_speed = old_speed
+                            # Пропускаем основной подбор (идём дальше)
+                        else:
+                            self._log("Изменение существенное, продолжаем подбор с новой скоростью")
+                            # Оставляем увеличенную скорость и переходим к основному подбору
+                    else:
+                        self._log("Не удалось измерить градиент, продолжаем без предкоррекции")
+                else:
+                    self._log("Стабилизация после увеличения скорости не удалась, возврат")
+                    self.camera.set_fan_speed(old_speed)
+                    self.current_fan_speed = old_speed
+            else:
+                self._log(f"Не удалось увеличить скорость: {msg}")
+
 
         # --- Шаг 6: Регулировка скорости вентилятора (если включена) ---
         if self.fan_control_enabled:
@@ -728,6 +826,10 @@ class ChamberProcess:
             # --- Шаг 7: После регулировки вентилятора проверяем температуру и при необходимости корректируем уставку ---
             sensors = self._read_sensors()
             current_temp = sensors['current_temp']
+            if not self._correct_setpoint_stepwise(target, current_temp):
+                self._log("Не удалось вернуть температуру в допуск после регулировки вентилятора")
+                return False
+            '''
             diff = abs(current_temp - target)
             if diff > self.epsilon_reach:
                 self._log(
@@ -758,6 +860,7 @@ class ChamberProcess:
                 else:
                     self._log("Не удалось вернуть температуру в допуск после регулировки вентилятора")
                     return False
+                '''
 
         # --- Шаг 8: Финальная стабилизация и сохранение результатов ---
         self._log("Финальная стабилизация перед выдержкой")
@@ -845,6 +948,69 @@ class ChamberProcess:
         except Exception as e:
             self._log(f"Ошибка сохранения результатов стабилизации: {e}")
 
+    def _correct_setpoint_stepwise(self, target: float, current_temp: float) -> bool:
+        """
+        Выполняет пошаговую коррекцию уставки в зависимости от отклонения.
+        Возвращает True, если после коррекции температура вошла в допуск.
+        """
+        error = target - current_temp
+        abs_error = abs(error)
+        max_step = self.max_correction
+
+        # Определяем начальный шаг в зависимости от величины ошибки
+        if abs_error >= 0.5:
+            first_step = 0.5
+        elif abs_error >= 0.3:
+            first_step = 0.3
+        else:
+            first_step = 0.0  # коррекция не требуется
+
+        # Применяем первый шаг, если он больше нуля
+        if first_step > 0:
+            correction = first_step if error > 0 else -first_step
+            new_setpoint = self._current_setpoint + correction
+            self._log(f"Коррекция уставки (первый шаг): {self._current_setpoint:.2f} -> {new_setpoint:.2f}")
+            self.camera.set_temperature(new_setpoint, channel=0)
+            self._current_setpoint = new_setpoint
+            self._update_data(current_setpoint=new_setpoint)
+
+            if not self._wait_for_stabilization(timeout=600):
+                self._log("Ошибка стабилизации после первого шага коррекции")
+                return False
+
+            # Обновляем текущую температуру после стабилизации
+            sensors = self._read_sensors()
+            current_temp = sensors['current_temp']
+            error = target - current_temp
+            abs_error = abs(error)
+
+        # Добираем остаток максимальными шагами
+        max_attempts = 20
+        attempt = 0
+        while abs_error > self.epsilon_reach and attempt < max_attempts and not self._stop_event.is_set():
+            # Ограничиваем шаг max_correction
+            step = max_step if error > 0 else -max_step
+            # Но не превышаем оставшуюся ошибку
+            if abs(step) > abs_error:
+                step = error  # последний шаг точно в цель
+            new_setpoint = self._current_setpoint + step
+            self._log(f"Коррекция уставки (шаг {attempt + 1}): {self._current_setpoint:.2f} -> {new_setpoint:.2f}")
+            self.camera.set_temperature(new_setpoint, channel=0)
+            self._current_setpoint = new_setpoint
+            self._update_data(current_setpoint=new_setpoint)
+
+            if not self._wait_for_stabilization(timeout=600):
+                self._log("Ошибка стабилизации при доборе")
+                return False
+
+            sensors = self._read_sensors()
+            current_temp = sensors['current_temp']
+            error = target - current_temp
+            abs_error = abs(error)
+            attempt += 1
+
+        return abs_error <= self.epsilon_reach
+
     def _hold_temperature(self, target: float, duration: float):
         """
         Выдержка температуры в течение заданного времени.
@@ -873,6 +1039,12 @@ class ChamberProcess:
                       f"разница={diff:.2f}°C, осталось={remaining / 60:.1f} мин")
 
             now = time.time()
+
+            # Коррекция выполняется не чаще чем correction_cooldown
+            if now - last_correction_time >= self.correction_cooldown and diff > self.epsilon_reach:
+                self._correct_setpoint_stepwise(user_target, current)
+                last_correction_time = time.time()
+            '''
             if now - last_correction_time >= 30 and diff > self.epsilon_reach:
                 error = user_target - current
                 remaining_error = error
@@ -903,43 +1075,12 @@ class ChamberProcess:
                     self._update_data(current_setpoint=new_setpoint)  # <-- ОБНОВЛЕНИЕ
 
                     self._wait_for_stabilization(timeout=600)
-
+                
                 last_correction_time = time.time()
-
-                time.sleep(self.update_interval)
-
-
-
-    def _hold_temperature_1(self, target: float, duration: float):
-        """Выдержка температуры в течение заданного времени"""
-        start_hold = time.time()
-        last_correction = time.time()
-
-        while not self._stop_event.is_set() and (time.time() - start_hold) < duration:
-            elapsed = time.time() - start_hold
-            remaining = duration - elapsed
-            sensors = self._read_sensors()
-            current = sensors['current_temp']
-            self._update_data(**sensors, hold_remaining=remaining)
-            self._ensure_fan_running()
-            # Управление нагревом вала
-            self._check_and_heat_shaft(current)
-            self._manage_shaft_heating_series()
-
-            diff = abs(current - target)
-            self._log(f"ВЫДЕРЖКА: T={current:.2f}°C, цель={target:.2f}°C, "
-                      f"разница={diff:.2f}°C, осталось={remaining/60:.1f} мин")
-
-            # Коррекция уставки при отклонении (каждые 30 сек)
-            if time.time() - last_correction >= 30:
-                if abs(current - target) > 0.1:
-                    new_sp = target - (current - target)
-                    self.camera.set_temperature(new_sp, channel=0)
-                    self._update_data(current_setpoint=new_sp)  # <-- добавить
-                    self._log(f"Коррекция уставки во время выдержки: новая уставка {new_sp:.2f}°C")
-                last_correction = time.time()
-
+            '''
             time.sleep(self.update_interval)
+
+
 
     def apply_preset(self):
         """Установка рекомендуемых параметров PID и скорости нагрева для начала работы"""
