@@ -9,19 +9,13 @@ class TemperatureProgram:
         self.current_index: Optional[int] = None
         self.filename: Optional[str] = None
 
-    def add_step_1(self, temperature: float, rate: float, hold_time: float) -> int:
-        """Добавить ступень, вернуть индекс."""
-        step = {
-            'temperature': round(temperature, 1),
-            'rate': round(rate, 1),
-            'hold_time': round(hold_time, 1)
-        }
-        self.steps.append(step)
-        return len(self.steps) - 1
+
+
 
     def add_step(self, temperature: float, rate: float, hold_time: float,
-                 pid_p: float = None, pid_i: int = None, pid_d: int = None) -> int:
-        """Добавить ступень с опциональными PID."""
+                 pid_p: float = None, pid_i: int = None, pid_d: int = None,
+                 setpoint: float = None, fan_speed: int = None) -> int:
+        """Добавить ступень с опциональными PID, уставкой и скоростью вентилятора."""
         step = {
             'temperature': round(temperature, 1),
             'rate': round(rate, 1),
@@ -33,6 +27,10 @@ class TemperatureProgram:
             step['pid_i'] = int(pid_i)
         if pid_d is not None:
             step['pid_d'] = int(pid_d)
+        if setpoint is not None:
+            step['setpoint'] = round(setpoint, 1)
+        if fan_speed is not None:
+            step['fan_speed'] = int(fan_speed)
         self.steps.append(step)
         return len(self.steps) - 1
 
@@ -43,8 +41,8 @@ class TemperatureProgram:
             self.steps[index]['pid_i'] = int(i)
             self.steps[index]['pid_d'] = int(d)
 
+
     def load(self, filepath: str):
-        """Загрузить программу из JSON с поддержкой PID."""
         with open(filepath, 'r', encoding='utf-8') as f:
             data = json.load(f)
         self.steps = []
@@ -60,6 +58,10 @@ class TemperatureProgram:
                 step['pid_i'] = int(item['pid_i'])
             if 'pid_d' in item:
                 step['pid_d'] = int(item['pid_d'])
+            if 'setpoint' in item:
+                step['setpoint'] = float(item['setpoint'])
+            if 'fan_speed' in item:
+                step['fan_speed'] = int(item['fan_speed'])
             self.steps.append(step)
         self.current_index = None
         self.filename = filepath
@@ -117,17 +119,3 @@ class TemperatureProgram:
             json.dump(self.steps, f, indent=2, ensure_ascii=False)
         self.filename = filepath
 
-    def load(self, filepath: str):
-        """Загрузить программу из JSON."""
-        with open(filepath, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        self.steps = []
-        for item in data:
-            if isinstance(item, dict) and 'temperature' in item and 'rate' in item and 'hold_time' in item:
-                self.steps.append({
-                    'temperature': float(item['temperature']),
-                    'rate': float(item['rate']),
-                    'hold_time': float(item['hold_time'])
-                })
-        self.current_index = None
-        self.filename = filepath
