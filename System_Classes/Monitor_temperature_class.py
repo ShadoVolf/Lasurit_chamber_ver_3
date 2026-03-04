@@ -17,10 +17,6 @@ class TemperatureMonitorWindow:
         self.fan_data = deque(maxlen=MAX_DATA_POINTS)
         self.gradient_data = deque(maxlen=MAX_DATA_POINTS)
 
-        self.show_temp = True
-        self.show_fan = True
-        self.show_gradient = True
-
         self.start_time = time.time()
         self.paused = False
         self.is_visible = False
@@ -94,14 +90,10 @@ class TemperatureMonitorWindow:
             self.fan_data.append(fan)
             self.gradient_data.append(grad)
 
-            # Обновление графиков
-            if self.show_temp and len(self.time_data) > 0 and len(self.temp_data) > 0:
+            # Обновление всех графиков
+            if len(self.time_data) > 0:
                 self.dpg.set_value(f"{self.window_tag}_temp_series", [list(self.time_data), list(self.temp_data)])
-
-            if self.show_fan and len(self.time_data) > 0 and len(self.fan_data) > 0:
                 self.dpg.set_value(f"{self.window_tag}_fan_series", [list(self.time_data), list(self.fan_data)])
-
-            if self.show_gradient and len(self.time_data) > 0 and len(self.gradient_data) > 0:
                 self.dpg.set_value(f"{self.window_tag}_gradient_series",
                                    [list(self.time_data), list(self.gradient_data)])
 
@@ -137,7 +129,7 @@ class TemperatureMonitorWindow:
 
         # Размеры и позиция окна
         window_width = 1020
-        window_height = 500  # Немного увеличена высота для добавления контроля интервала
+        window_height = 500
         pos_x = 860
         pos_y = 705
 
@@ -158,22 +150,14 @@ class TemperatureMonitorWindow:
                     self.dpg.add_line_series([], [], label="Скорость вент., %", tag=f"{self.window_tag}_fan_series")
                     self.dpg.add_line_series([], [], label="Градиент, °C/мин", tag=f"{self.window_tag}_gradient_series")
 
-            # Панель управления
+            # Панель управления (без чекбоксов)
             with self.dpg.group(horizontal=True):
-                self.dpg.add_checkbox(label="Температура", default_value=True,
-                                      callback=lambda: self.toggle_series(f"{self.window_tag}_temp_series",
-                                                                          "show_temp"))
-                self.dpg.add_checkbox(label="Скорость вент.", default_value=True,
-                                      callback=lambda: self.toggle_series(f"{self.window_tag}_fan_series", "show_fan"))
-                self.dpg.add_checkbox(label="Градиент", default_value=True,
-                                      callback=lambda: self.toggle_series(f"{self.window_tag}_gradient_series",
-                                                                          "show_gradient"))
-
-                self.dpg.add_spacer(width=20)
+                self.dpg.add_spacer(width=5)
                 self.dpg.add_button(label="Очистить", callback=self.clear_data, width=80)
                 self.dpg.add_button(label="Пауза", tag=f"{self.window_tag}_pause_btn",
                                     callback=self.toggle_pause, width=80)
                 self.dpg.add_button(label="Экспорт", callback=self.export_data, width=80)
+                self.dpg.add_spacer(width=5)
 
             # Статусная строка
             self.dpg.add_text("", tag=f"{self.window_tag}_status")
@@ -211,12 +195,6 @@ class TemperatureMonitorWindow:
             with self.dpg.theme_component(self.dpg.mvLineSeries):
                 self.dpg.add_theme_color(self.dpg.mvPlotCol_Line, (r, g, b), category=self.dpg.mvThemeCat_Plots)
         return series_theme
-
-    def toggle_series(self, series_tag, attr_name):
-        """Переключение видимости серии"""
-        visible = self.dpg.get_value(series_tag.replace(f"{self.window_tag}_", "").replace("_series", ""))
-        self.dpg.configure_item(series_tag, show=visible)
-        setattr(self, attr_name, visible)
 
     def toggle_pause(self):
         """Пауза/продолжение обновления данных"""
@@ -280,6 +258,15 @@ class TemperatureMonitorWindow:
         else:
             self.dpg.set_value(f"{self.window_tag}_interval_info",
                                f" | Интервал: {MIN_UPDATE_INTERVAL} сек")
+
+    def set_paused(self, paused: bool):
+        """
+        Установить состояние паузы обновления графика.
+        """
+        self.paused = paused
+        # Если окно открыто, обновляем текст кнопки паузы
+        if self.dpg.does_item_exist(f"{self.window_tag}_pause_btn"):
+            self.dpg.set_value(f"{self.window_tag}_pause_btn", "Продолжить" if paused else "Пауза")
 
     def update(self):
         """Метод для вызова из главного цикла приложения"""
