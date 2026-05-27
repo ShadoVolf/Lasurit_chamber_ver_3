@@ -389,6 +389,7 @@ class TPM12_GUI:
             self.temp_ch1 = proc_data.current_temp
             self.temp_ch2 = proc_data.gradient
             self.device_setpoint = proc_data.current_setpoint  # обновляем текущую уставку из процесса
+            self.user_setpoint = proc_data.target_temp
             # Статус уже установлен процессом
             status_map = {
                 ProcessStatus.HEATING: ChamberStatus.HEATING,
@@ -407,6 +408,9 @@ class TPM12_GUI:
                 motor_gui = DEVICES_DATA.get_blsd_gui()
                 if motor_gui:
                     motor_gui.freeze_time()
+                temp_monitor = DEVICES_DATA.get_temp_monitor()  # <-- добавить
+                if temp_monitor:
+                    temp_monitor.set_paused(True)
             self._prev_process_status = proc_data.process_status
         else:
             # Процесс не запущен – используем данные напрямую с прибора
@@ -725,6 +729,8 @@ class TPM12_GUI:
         self.user_setpoint = new_value
         self.setpoint = new_value
         self.user_setpoint_manually_set = True  # запомнили, что пользователь задавал
+        if self.dpg.does_item_exist(f"{self.tag}_setpoint_val"):
+            self.dpg.set_value(f"{self.tag}_setpoint_val", f"{self.user_setpoint:3.1f}°C")
         if self.driver and hasattr(self.driver, 'set_temperature'):
             self.driver.set_temperature(new_value, channel=0)
         print(f"Уставка установлена: {new_value}°C")
@@ -765,6 +771,7 @@ class TPM12_GUI:
         temp_monitor = DEVICES_DATA.get_temp_monitor()
         if temp_monitor:
             temp_monitor.clear_data()
+            temp_monitor.set_paused(False)
         motor_gui = DEVICES_DATA.get_blsd_gui()
         if motor_gui:
             motor_gui.start_time = time.time()
@@ -789,6 +796,9 @@ class TPM12_GUI:
             motor_gui = DEVICES_DATA.get_blsd_gui()
             if motor_gui:
                 motor_gui.freeze_time()
+            temp_monitor = DEVICES_DATA.get_temp_monitor()
+            if temp_monitor:
+                temp_monitor.set_paused(True)
 
     def _reset_operation(self):
         """Сброс операции."""
