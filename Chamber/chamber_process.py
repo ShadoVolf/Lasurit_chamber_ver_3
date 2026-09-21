@@ -8,6 +8,7 @@ from datetime import datetime
 from Chamber.chamber_data import ChamberData, ProcessStatus
 from Chamber.chamber_driver import CameraController
 from Chamber.temperature_program import TemperatureProgram
+from Chamber.chamber_logger import get_logger
 
 
 class ChamberProcess:
@@ -18,6 +19,7 @@ class ChamberProcess:
     def __init__(self, camera_controller: CameraController):
         self._current_setpoint = None
         self.camera = camera_controller
+        self.logger = get_logger()
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
@@ -306,68 +308,6 @@ class ChamberProcess:
             self.current_fan_speed = fan_speed
             self._log(f"Установлена скорость вентилятора из ступени: {fan_speed} об/мин")
 
-    def _save_current_pid_1(self):
-        """Сохранить текущие PID в зависимости от контекста."""
-        pid = self.camera.get_pid_parameters(channel=0)
-        if not pid:
-            return
-        p = pid.get('P')
-        i = pid.get('I')
-        d = pid.get('D')
-        if p is None or i is None or d is None:
-            return
-
-        if self._program is None:
-            # Ручной режим – сохраняем в temp_pid.json
-            self._save_pid_to_temp_file(self._target_temp, p, i, d)
-        elif self._program_file is not None:
-            # Программа из файла – обновляем ступень в памяти
-            if 0 <= self.current_step_index < len(self._program.steps):
-                self._program.update_step_pid(self.current_step_index, p, i, d)
-                self._log(f"PID ступени {self.current_step_index + 1} обновлены в памяти")
-        # Если программа временная (без файла) – ничего не сохраняем
-
-    def _save_current_pid_2(self):
-        """Сохранить текущие PID в зависимости от контекста."""
-        pid = self.camera.get_pid_parameters(channel=0)
-        if not pid:
-            return
-        p = pid.get('P')
-        i = pid.get('I')
-        d = pid.get('D')
-        if p is None or i is None or d is None:
-            return
-
-        if self._program is None:
-            # Ручной режим – сохраняем в temp_pid.json
-            self._save_pid_to_temp_file(self._target_temp, p, i, d)
-            return
-
-        # Обновляем ступень в памяти
-        if 0 <= self.current_step_index < len(self._program.steps):
-            step = self._program.steps[self.current_step_index]
-            step['pid_p'] = round(p, 2)
-            step['pid_i'] = int(i)
-            step['pid_d'] = int(d)
-            step['setpoint'] = self._current_setpoint
-            step['fan_speed'] = self.current_fan_speed
-
-            # Если программа из файла – сохраняем в этот файл
-            if self._program_file is not None:
-                try:
-                    with open(self._program_file, 'w', encoding='utf-8') as f:
-                        json.dump(self._program.steps, f, indent=2, ensure_ascii=False)
-                    self._log(f"PID ступени {self.current_step_index + 1} сохранены в {self._program_file}")
-                except Exception as e:
-                    self._log(f"Ошибка сохранения в файл программы: {e}")
-            else:
-                # Временная программа – сохраняем в temp_program_pid.json
-                try:
-                    with open(self.temp_program_pid_file, 'w', encoding='utf-8') as f:
-                        json.dump(self._program.steps, f, indent=2, ensure_ascii=False)
-                    self._log(f"PID временной программы сохранены в {self.temp_program_pid_file}")
-                except Exception as e:
-                    self._log(f"Ошибка сохранения во временный файл: {e}")
 
     def _save_current_pid(self):
         """Сохранить текущие PID в зависимости от контекста."""
@@ -750,12 +690,18 @@ class ChamberProcess:
                 attempts=attempts,
                 final_delay=final_delay
             )
-
+    '''
     @staticmethod
     def _log(message: str):
         """Вывод сообщения в консоль с временной меткой"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{timestamp}] {message}")
+   '''
+
+    def _log(self, message: str, level: str = "INFO"):
+        """Вывод сообщения в лог (консоль + файл)"""
+        self.logger.log(message, level)
+
 
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()

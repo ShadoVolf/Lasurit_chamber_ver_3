@@ -13,7 +13,7 @@ from owen.Temp_Corrector_class import PolynomialCorrector
 
 
 # Класс для управления температурной камерой
-class CameraController:
+class   CameraController:
     """
     Единый драйвер управления камерой, использующий три устройства:
     1. BLSD-20Modbus (двигатель вентилятора)
@@ -468,6 +468,7 @@ class CameraController:
             if self.blsd20 and hasattr(self.blsd20, 'start_motor'):
                 if not self.blsd20.start_motor():
                     return False, "Ошибка включения двигателя"
+                self.turn_on_motor_blower()
 
             # Устанавливаем режим автоматического регулирования для TRM12
             if self.trm12 and hasattr(self.trm12, 'set_control_mode'):
@@ -495,6 +496,7 @@ class CameraController:
             if self.blsd20 and hasattr(self.blsd20, 'stop_motor'):
                 if not self.blsd20.stop_motor():
                     return False, "Ошибка остановки двигателя"
+                self.turn_off_motor_blower()
 
             # Переводим TRM12 в ручной режим
             if self.trm12 and hasattr(self.trm12, 'set_control_mode'):
@@ -683,9 +685,55 @@ class CameraController:
         except Exception as e:
             return False, f"Ошибка: {e}"
 
+    def turn_on_motor_blower(self) -> Tuple[bool, str]:
+        """
+        Включить вентилятор двигателя (реле 2)
+
+        Returns:
+            Tuple[bool, str]: (Успех, Сообщение)
+        """
+        try:
+            if not self.relay or not hasattr(self.relay, 'is_connected') or not self.relay.is_connected():
+                return False, "Релейная плата не подключена"
+
+            # Включаем  реле 2
+            success1 = self.relay.open_relay(2)
+            if success1:
+                return True, "Вентилятор двигателя включен"
+            else:
+                # Если одно из реле не включилось, выключаем оба для безопасности
+                self.relay.close_relay(2)
+                return False, "Ошибка включения вентялятора двигателя"
+        except Exception as e:
+            return False, f"Ошибка включения вентилятора двигателя: {e}"
+
+
+    def turn_off_motor_blower(self) -> Tuple[bool, str]:
+        """
+        Выключить вентилятор двигателя (реле 2)
+
+        Returns:
+            Tuple[bool, str]: (Успех, Сообщение)
+        """
+        try:
+            if not self.relay or not hasattr(self.relay, 'is_connected') or not self.relay.is_connected():
+                return False, "Релейная плата не подключена"
+
+            # Выключаем реле 2
+            success1 = self.relay.close_relay(2)
+
+            if success1:
+
+                return True, "Вентилятор двигателя выключен"
+            else:
+                return False, "Ошибка выключения вентилятора двигателя"
+        except Exception as e:
+            return False, f"Ошибка выключения вентилятора двигателя: {e}"
+
+
     def turn_on_motor_heating(self) -> Tuple[bool, str]:
         """
-        Включить нагрев двигателя (включить реле 1 и реле 2)
+        Включить нагрев двигателя (включить реле 1)
 
         Returns:
             Tuple[bool, str]: (Успех, Сообщение)
@@ -696,13 +744,14 @@ class CameraController:
 
             # Включаем реле 1 и реле 2
             success1 = self.relay.open_relay(1)
-            success2 = self.relay.open_relay(2)
-            if success1 and success2:
+            #success2 = self.relay.open_relay(2)
+            #if success1 and success2:
+            if success1:
                 return True, "Нагрев двигателя включен"
             else:
                 # Если одно из реле не включилось, выключаем оба для безопасности
                 self.relay.close_relay(1)
-                self.relay.close_relay(2)
+                #self.relay.close_relay(2)
                 return False, "Ошибка включения нагрева двигателя"
         except Exception as e:
             return False, f"Ошибка включения нагрева двигателя: {e}"
@@ -720,8 +769,11 @@ class CameraController:
 
             # Выключаем реле 1 и реле 2
             success1 = self.relay.close_relay(1)
-            success2 = self.relay.close_relay(2)
-            if success1 and success2:
+            #success2 = self.relay.close_relay(2)
+
+            #if success1 and success2:
+            if success1:
+
                 return True, "Нагрев двигателя выключен"
             else:
                 return False, "Ошибка выключения нагрева двигателя"

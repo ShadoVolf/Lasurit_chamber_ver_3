@@ -18,5 +18,8 @@
     "shaft_min_temp_for_heating": 10.0,
     "shaft_heating_duration": 5.0,
     "shaft_heating_repetitions": 3,
-    "shaft_heating_interval": 40.0
+    "shaft_heating_interval": 40.0,
+    "fan_control_enabled": true,
+    "shaft_check_enabled": true,
+    "auto_apply_pid": true
 }
