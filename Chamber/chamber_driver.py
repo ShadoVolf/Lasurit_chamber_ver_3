@@ -43,6 +43,10 @@ class   CameraController:
         self.shaft_max_attempts = 15  # максимальное количество попыток
         self.shaft_initial_delay = 5.0  # задержка после переключения реле
         self.shaft_final_delay = 20.0
+        #Блокировки
+        self._lock_blsd = threading.RLock()
+        self._lock_trm = threading.RLock()
+        self._lock_relay = threading.RLock()
 
     def set_shaft_params(self, stabilization_interval: float = None, attempts: int = None,
                          initial_delay: float = None, final_delay: float = None):
@@ -846,6 +850,8 @@ class   CameraController:
 
         except Exception as e:
             return False, f"Ошибка аварийной остановки: {e}"
+
+
 
     def get_fan_speed(self) -> Optional[int]:
         """

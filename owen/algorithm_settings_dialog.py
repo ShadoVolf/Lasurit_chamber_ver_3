@@ -49,6 +49,21 @@ def _load_settings_from_file(chamber_process):
         "fan_control_enabled": True,
         "shaft_check_enabled": True,
         "auto_apply_pid": True,
+        # ─────── НОВЫЕ: параметры стабилизации ───────
+        "stabilization_timeout_default": getattr(
+            chamber_process, "stabilization_timeout_default", 1800),
+        "stabilization_timeout_saved": getattr(
+            chamber_process, "stabilization_timeout_saved", 900),
+        "epsilon_stable_simplified_multiplier": getattr(
+            chamber_process, "epsilon_stable_simplified_multiplier", 3.0),
+        "required_stable_simplified": getattr(
+            chamber_process, "required_stable_simplified", 3),
+        "epsilon_reach_approach": getattr(
+            chamber_process, "epsilon_reach_approach", 2.0),
+        "FAN_MIN_RUNNING_SPEED": getattr(
+            chamber_process, "FAN_MIN_RUNNING_SPEED", 50),
+        "pre_hold_enabled": getattr(chamber_process, "pre_hold_enabled", False),
+        "min_p_value": getattr(chamber_process, "min_p_value", 1.5),
 
     }
 
@@ -92,7 +107,7 @@ def show_algorithm_settings_dialog(dpg_instance, tag_prefix, chamber_process, cu
     if dpg_instance.does_item_exist(modal_tag):
         dpg_instance.delete_item(modal_tag)
 
-    window_width, window_height = 610, 630  # увеличена высота для новых полей
+    window_width, window_height = 610, 820  # увеличена высота для новых полей
     vp_w = dpg_instance.get_viewport_width()
     vp_h = dpg_instance.get_viewport_height()
     pos_x = (vp_w - window_width) // 2
@@ -116,7 +131,7 @@ def show_algorithm_settings_dialog(dpg_instance, tag_prefix, chamber_process, cu
         dpg_instance.add_spacer(height=5)
 
         container = f"{modal_tag}_container"
-        with dpg_instance.child_window(tag=container, width=window_width-40, height=430, border=True):
+        with dpg_instance.child_window(tag=container, width=window_width-40, height=620, border=True):
             _create_input_fields(dpg_instance, container, modal_tag, current_settings, tag_prefix)
 
         dpg_instance.add_spacer(height=10)
@@ -209,6 +224,26 @@ def _create_input_fields(dpg_instance, parent_tag, base_tag, current_settings, t
         ("fan_control_enabled", "Регулировка вентилятора", "bool", None, None, None),
         ("shaft_check_enabled", "Проверка температуры вала", "bool", None, None, None),
         ("auto_apply_pid", "Автоприменение PID", "bool", None, None, None),
+        ("stabilization_timeout_default", "Таймаут полного подбора PID (сек)",
+         "int", 60, 60, 7200),
+        ("stabilization_timeout_saved", "Таймаут с сохранёнными PID (сек)",
+         "int", 60, 60, 7200),
+        ("epsilon_stable_simplified_multiplier",
+         "Множитель ε_stable (упрощ. критерий)",
+         "float", 0.1, 1.0, 10.0),
+        ("required_stable_simplified",
+         "Замеров подряд (упрощ. критерий)",
+         "int", 1, 1, 20),
+        ("epsilon_reach_approach",
+         "ε_reach_approach — грубый выход на режим (°C)",
+         "float", 0.1, 0.5, 10.0),
+        ("FAN_MIN_RUNNING_SPEED",
+         "Мин. обороты вентилятора (об/мин)",
+         "float", 5.0, 0.0, 500.0),
+        ("pre_hold_enabled",
+         "Пред. выдержка (отсчёт с первичной стабилизации)",
+         "bool", None, None, None),
+        ("min_p_value", "Минимальное значение P", "float", 0.1, 0.0, 20.0),
     ]
 
     with dpg_instance.table(
@@ -285,6 +320,14 @@ def _set_default_values(dpg_instance, base_tag, chamber_process):
         "fan_control_enabled": True,
         "shaft_check_enabled": True,
         "auto_apply_pid": True,
+        "stabilization_timeout_default": 1800,
+        "stabilization_timeout_saved": 900,
+        "epsilon_stable_simplified_multiplier": 3.0,
+        "required_stable_simplified": 3,
+        "epsilon_reach_approach": 2.0,
+        "FAN_MIN_RUNNING_SPEED": 50,
+        "pre_hold_enabled": False,
+        "min_p_value": 1.5,
     }
     for key, value in defaults.items():
         tag = f"{base_tag}_{key}"
@@ -313,6 +356,14 @@ def _apply_and_close(dpg_instance, base_tag, apply_callback):
         "fan_control_enabled",  # <-- добавить
         "shaft_check_enabled",
         "auto_apply_pid",
+        "stabilization_timeout_default",
+        "stabilization_timeout_saved",
+        "epsilon_stable_simplified_multiplier",
+        "required_stable_simplified",
+        "epsilon_reach_approach",
+        "FAN_MIN_RUNNING_SPEED",
+        "pre_hold_enabled",
+        "min_p_value",
     ]
     for key in keys:
         tag = f"{base_tag}_{key}"

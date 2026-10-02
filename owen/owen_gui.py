@@ -506,6 +506,16 @@ class TPM12_GUI:
             "fan_control_enabled": self.chamber_process.fan_control_enabled,
             "shaft_check_enabled": self.chamber_process.shaft_check_enabled,
             "auto_apply_pid": self.chamber_process.auto_apply_pid,
+            # ─────── НОВЫЕ ПАРАМЕТРЫ СТАБИЛИЗАЦИИ ───────
+            "stabilization_timeout_default": self.chamber_process.stabilization_timeout_default,
+            "stabilization_timeout_saved": self.chamber_process.stabilization_timeout_saved,
+            "epsilon_stable_simplified_multiplier":
+                getattr(self.chamber_process, "epsilon_stable_simplified_multiplier", 3.0),
+            "required_stable_simplified": self.chamber_process.required_stable_simplified,
+            "epsilon_reach_approach": self.chamber_process.epsilon_reach_approach,
+            "FAN_MIN_RUNNING_SPEED": self.chamber_process.FAN_MIN_RUNNING_SPEED,
+            "pre_hold_enabled": self.chamber_process.pre_hold_enabled,
+            "min_p_value": getattr(self.chamber_process, "min_p_value", 2.5),
         }
 
         show_algorithm_settings_dialog(

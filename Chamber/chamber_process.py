@@ -93,7 +93,83 @@ class ChamberProcess:
         self._temp_pid_file = "temp_pid.json"  # файл для ручного режима
         self.temp_program_pid_file = "temp_program_pid.json"
 
+        # Таймауты стабилизации (сек)
+        self.stabilization_timeout_default = 1800  # 30 мин — полный подбор
+        self.stabilization_timeout_saved = 900  # 15 мин — с сохранёнными PID
+        # Параметры упрощённого критерия (в 3 раза мягче основного)
+        self.epsilon_stable_simplified_multiplier = 3.0
+        self.epsilon_stable_simplified = self.epsilon_stable * self.epsilon_stable_simplified_multiplier
+        self.required_stable_simplified = 3
+
+        self.epsilon_reach = 0.2  # финальная стабилизация (было)
+        self.epsilon_reach_approach = 2.0  # грубый выход на режим — новый параметр
+
+        self.FAN_MIN_RUNNING_SPEED = 50  # об/мин — ниже считаем «стоит»
+        self._last_fan_ensure_time = 0
+        # --- Флаг «Пред. выдержка» ---
+        self.pre_hold_enabled = False  # отсчёт выдержки с первичной стабилизации
+        self._pre_hold_start_time = None  # момент окончания первичной стабилизации
+        self._current_hold_seconds = 0.0  # длительность текущей выдержки (для GUI)
+
+        self.min_p_value = 1.5
+
     def _load_pid_for_step(self, step_index: int, target_temp: float) -> Optional[dict]:
+        """
+        Возвращает словарь с PID, setpoint и fan_speed для ступени step_index.
+        Приоритет:
+          1. Если программа загружена из файла – данные из ступени (уже в self._program.steps).
+          2. Если программа временная – данные из temp_program_pid.json (по индексу).
+          3. Данные из temp_pid.json (ручной режим) по целевой температуре.
+        Возвращает None, если ничего не найдено.
+        """
+        if self._program is None:
+            return None
+
+        step = self._program.steps[step_index]
+
+        # 1. Проверяем, есть ли PID в текущей ступени (из загруженного файла или ранее сохранённые)
+        if 'pid_p' in step and 'pid_i' in step and 'pid_d' in step:
+            return {
+                'p': step['pid_p'],
+                'i': step['pid_i'],
+                'd': step['pid_d'],
+                'setpoint': step.get('setpoint'),
+                'fan_speed': step.get('fan_speed')
+            }
+
+        # 2. Если программа временная – пытаемся загрузить из temp_program_pid.json
+        if self._program_file is None:
+            saved_steps = self._safe_load_json(self.temp_program_pid_file, default=None)
+            if isinstance(saved_steps, list) and step_index < len(saved_steps):
+                saved = saved_steps[step_index]
+                if isinstance(saved, dict) and 'pid_p' in saved and 'pid_i' in saved and 'pid_d' in saved:
+                    return {
+                        'p': saved['pid_p'],
+                        'i': saved['pid_i'],
+                        'd': saved['pid_d'],
+                        'setpoint': saved.get('setpoint'),
+                        'fan_speed': saved.get('fan_speed')
+                    }
+
+        # 3. Пытаемся загрузить из temp_pid.json по температуре
+        data = self._safe_load_json(self._temp_pid_file, default=None)
+        if isinstance(data, dict):
+            key = str(round(target_temp, 1))
+            if key in data and isinstance(data[key], dict):
+                pid = data[key]
+                if 'p' in pid and 'i' in pid and 'd' in pid:
+                    return {
+                        'p': pid['p'],
+                        'i': pid['i'],
+                        'd': pid['d'],
+                        'setpoint': pid.get('setpoint'),
+                        'fan_speed': pid.get('fan_speed')
+                    }
+
+        return None
+
+
+    def _load_pid_for_step_1(self, step_index: int, target_temp: float) -> Optional[dict]:
         """
         Возвращает словарь с PID, setpoint и fan_speed для ступени step_index.
         Приоритет:
@@ -156,58 +232,159 @@ class ChamberProcess:
         return None
 
     def _ensure_fan_running(self):
-        """Проверяет, работает ли вентилятор, и перезапускает при остановке."""
-        if not self.is_running() or not self.fan_control_enabled:
+        """
+        Проверяет состояние вентилятора и перезапускает при остановке.
+
+        Признаки остановки (любой из):
+          * get_speed() < FAN_MIN_RUNNING_SPEED (фактические обороты);
+          * get_status() == 0 (СТОП).
+
+        При ошибке записи/запуска _last_fan_ensure_time сбрасывается в 0,
+        чтобы следующая попытка была не через 5 секунд, а сразу.
+        """
+
+        #self._log('Проверка скорости вентилятора', 'INFO')
+        #self._log(str(self.is_running()),"INFO")
+        if not self.is_running():
             return
 
         now = time.time()
+        #self._log(str(now), 'INFO')
         if now - self._last_fan_ensure_time < self.FAN_ENSURE_INTERVAL:
             return
         self._last_fan_ensure_time = now
 
-        # Проверяем состояние двигателя
-        if self.camera.blsd20 and self.camera.blsd20.connected:
-            status = self.camera.blsd20.get_status()
-            if status == self.camera.blsd20.MotorStatus.STOPPED:
-                self._log("ВНИМАНИЕ: вентилятор остановлен. Выполняется повторный запуск...")
-                # Убедимся, что скорость установлена
-                self.camera.blsd20.set_speed(self.current_fan_speed)
-                self.camera.blsd20.start_motor()
-                self._log(f"Вентилятор перезапущен со скоростью {self.current_fan_speed} об/мин")
+        if not (self.camera.blsd20 and getattr(self.camera.blsd20, 'connected', False)):
+            self._log("Вентилятор: BLSD-20 не подключён — проверка пропущена",
+                      level="WARNING")
+            return
 
+        # --- Чтение фактических оборотов и статуса ---
+        status_raw = ""
+        try:
+            actual_speed = self.camera.blsd20.get_speed()
+        except Exception as e:
+            actual_speed = None
+            self._log(f"Ошибка чтения оборотов вентилятора: {e}", level="ERROR")
 
+        try:
+            status_raw = self.camera.blsd20.get_status()
+        except Exception as e:
+            status_raw = None
+            self._log(f"Ошибка чтения статуса вентилятора: {e}", level="ERROR")
 
-    def start_program_1(self, program: TemperatureProgram, program_file: Optional[str] = None):
+        try:
+            status_val = int(status_raw) if status_raw is not None else None
+        except (TypeError, ValueError):
+            status_val = None
+
+        # --- Диагностика: пишем состояние при каждой проверке ---
+        self._log(
+            f"Проверка вентилятора: факт. обороты={actual_speed}, "
+            f"статус={status_val}, уставка={self.current_fan_speed}",
+            level="DEBUG"
+        )
+
+        # --- Решение: стоит ли вентилятор ---
+        threshold = getattr(self, 'FAN_MIN_RUNNING_SPEED', 50)
+        reasons = []
+        if actual_speed is not None and actual_speed < threshold:
+            reasons.append(f"обороты {actual_speed} < {threshold}")
+        if status_val == 0:
+            reasons.append("статус = СТОП")
+
+        if not reasons:
+            return
+
+        # --- Перезапуск ---
+        self._log(
+            f"ВНИМАНИЕ: вентилятор остановлен ({', '.join(reasons)}). "
+            f"Перезапуск на {self.current_fan_speed} об/мин...",
+            level="WARNING"
+        )
+
+        ok_speed, msg = self.camera.set_fan_speed(self.current_fan_speed)
+        if not ok_speed:
+            self._log(f"Не удалось установить скорость: {msg}", level="ERROR")
+            self._last_fan_ensure_time = 0  # ← повторим на следующей итерации
+            return
+
+        try:
+            ok_start = self.camera.blsd20.start_motor()
+        except Exception as e:
+            self._log(f"Исключение при запуске двигателя: {e}", level="ERROR")
+            self._last_fan_ensure_time = 0
+            return
+
+        if not ok_start:
+            self._log("start_motor() вернул False", level="ERROR")
+            self._last_fan_ensure_time = 0
+            return
+
+        time.sleep(1.5)
+
+        try:
+            new_speed = self.camera.blsd20.get_speed()
+        except Exception:
+            new_speed = None
+
+        if new_speed is None or new_speed < threshold:
+            self._log(
+                f"Вентилятор НЕ раскрутился (speed={new_speed}). "
+                f"Будет повторная попытка.",
+                level="ERROR"
+            )
+            self._last_fan_ensure_time = 0
+            return
+
+        self._log(f"Вентилятор перезапущен. Фактические обороты: {new_speed}")
+
+    def start_program(self, program: TemperatureProgram, program_file: Optional[str] = None):
         """Запуск программы с возможным путём к файлу."""
         if self.is_running():
             raise RuntimeError("Процесс уже запущен")
+
         self._program = program
         self._program_file = program_file
         self.current_step_index = 0
         self._stop_event.clear()
+
         # Если программа временная (нет файла) и существует временный файл программы,
         # загружаем из него ступени и заменяем ими текущую программу.
-        if program_file is None and os.path.exists(self.temp_program_pid_file):
+        if program_file is None:
+            saved_steps = self._safe_load_json(self.temp_program_pid_file, default=None)
+            if isinstance(saved_steps, list) and saved_steps:
+                self._program.steps = saved_steps
+                self._log(
+                    f"Загружена программа из {self.temp_program_pid_file} "
+                    f"({len(saved_steps)} ступеней)"
+                )
+
+        # --- НОВЫЙ БЛОК: сохраняем программу во временный файл при запуске
+        #     (для временных программ) ---
+        if program_file is None:
             try:
-                with open(self.temp_program_pid_file, 'r', encoding='utf-8') as f:
-                    saved_steps = json.load(f)
-                if saved_steps and isinstance(saved_steps, list):
-                    self._program.steps = saved_steps
-                    self._log(f"Загружена программа из {self.temp_program_pid_file} ({len(saved_steps)} ступеней)")
+                tmp = self.temp_program_pid_file + ".tmp"
+                with open(tmp, 'w', encoding='utf-8') as f:
+                    json.dump(self._program.steps, f, indent=2, ensure_ascii=False)
+                os.replace(tmp, self.temp_program_pid_file)
+                self._log(f"Программа сохранена в {self.temp_program_pid_file}")
             except Exception as e:
-                self._log(f"Ошибка загрузки временного файла программы: {e}")
+                self._log(f"Ошибка сохранения программы во временный файл: {e}")
 
         self.apply_preset()
         self.current_fan_speed = 1000
         self.camera.set_fan_speed(1000)
+
         first_step = program.steps[0]
         self.camera.set_temperature(first_step['temperature'], channel=0)
         self.camera.turn_on_camera()
         self._log(f"Запуск программы из {len(program.steps)} ступеней")
+
         self._thread = threading.Thread(target=self._program_loop, daemon=True)
         self._thread.start()
 
-    def start_program(self, program: TemperatureProgram, program_file: Optional[str] = None):
+    def start_program_1(self, program: TemperatureProgram, program_file: Optional[str] = None):
         """Запуск программы с возможным путём к файлу."""
         if self.is_running():
             raise RuntimeError("Процесс уже запущен")
@@ -247,41 +424,50 @@ class ChamberProcess:
         self._thread = threading.Thread(target=self._program_loop, daemon=True)
         self._thread.start()
 
-
     def _apply_pid_for_target(self, target_temp: float) -> bool:
         """Загрузить PID из temp_pid.json для целевой температуры и применить.
-        Возвращает True, если данные найдены и применены."""
+        Возвращает True только если данные найдены И успешно применены."""
         if not os.path.exists(self._temp_pid_file):
             return False
         try:
             with open(self._temp_pid_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             key = str(round(target_temp, 1))
-            if key in data:
-                pid = data[key]
-                self.camera.set_pid_parameters(
-                    P=pid.get('p'),
-                    I=pid.get('i'),
-                    D=pid.get('d'),
-                    channel=0
-                )
-                # Применяем сохранённую уставку терморегулятора, если она есть
-                if 'setpoint' in pid and pid['setpoint'] is not None:
-                    self.camera.set_temperature(pid['setpoint'], channel=0)
-                    self._current_setpoint = pid['setpoint']
-                    self._update_data(current_setpoint=self._current_setpoint)
-                # Применяем сохранённую скорость вентилятора
-                if 'fan_speed' in pid and pid['fan_speed'] is not None:
-                    self.camera.set_fan_speed(pid['fan_speed'])
-                    self.current_fan_speed = pid['fan_speed']
-                self._log(
-                    f"Применены сохранённые PID для температуры {target_temp}°C: "
-                    f"P={pid['p']}, I={pid['i']}, D={pid['d']}, "
-                    f"setpoint={pid.get('setpoint')}, fan_speed={pid.get('fan_speed')}")
-                return True
+            if key not in data:
+                return False
+
+            pid = data[key]
+            ok, msg = self.camera.set_pid_parameters(
+                P=pid.get('p'), I=pid.get('i'), D=pid.get('d'), channel=0
+            )
+            if not ok:
+                self._log(f"Не удалось применить сохранённые PID: {msg}", level="ERROR")
+                return False
+
+            if pid.get('setpoint') is not None:
+                ok, msg = self.camera.set_temperature(pid['setpoint'], channel=0)
+                if not ok:
+                    self._log(f"Не удалось применить сохранённую уставку: {msg}",
+                              level="ERROR")
+                    return False
+                self._current_setpoint = pid['setpoint']
+                self._update_data(current_setpoint=self._current_setpoint)
+
+            if pid.get('fan_speed') is not None:
+                self.camera.set_fan_speed(pid['fan_speed'])
+                self.current_fan_speed = pid['fan_speed']
+
+            self._log(
+                f"Применены сохранённые PID для T={target_temp}°C: "
+                f"P={pid['p']}, I={pid['i']}, D={pid['d']}, "
+                f"setpoint={pid.get('setpoint')}, fan_speed={pid.get('fan_speed')}"
+            )
+            return True
         except Exception as e:
-            self._log(f"Ошибка загрузки PID из файла: {e}")
-        return False
+            self._log(f"Ошибка загрузки PID из файла: {e}", level="ERROR")
+            return False
+
+
 
 
     def _apply_pid_from_step(self, step: dict):
@@ -351,8 +537,48 @@ class ChamberProcess:
                 except Exception as e:
                     self._log(f"Ошибка сохранения во временный файл: {e}")
 
+    def _safe_load_json(self, path: str, default):
+        """Читает JSON; при пустом/битом файле возвращает default."""
+        if not os.path.exists(path):
+            return default
+        try:
+            if os.path.getsize(path) == 0:
+                return default
+            with open(path, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+            if not content:
+                return default
+            return json.loads(content)
+        except (json.JSONDecodeError, OSError) as e:
+            self._log(f"Повреждён JSON в {path}: {e}. Использую значение по умолчанию.")
+            return default
 
     def _save_pid_to_temp_file(self, target: float, p: float, i: int, d: int):
+        try:
+            data = self._safe_load_json(self._temp_pid_file, default={})
+            if not isinstance(data, dict):
+                data = {}
+
+            key = str(round(target, 1))
+            data[key] = {
+                'p': p,
+                'i': i,
+                'd': d,
+                'setpoint': self._current_setpoint,
+                'fan_speed': self.current_fan_speed,
+                'timestamp': time.time()
+            }
+            # атомарная запись — сначала во временный файл, потом замена
+            tmp = self._temp_pid_file + ".tmp"
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            os.replace(tmp, self._temp_pid_file)
+            self._log(f"PID для температуры {target}°C сохранены в {self._temp_pid_file}")
+        except Exception as e:
+            self._log(f"Ошибка сохранения PID в файл: {e}")
+
+
+    def _save_pid_to_temp_file_1(self, target: float, p: float, i: int, d: int):
         """Сохранить PID для ручного режима в temp_pid.json (замена по ключу)."""
         try:
             data = {}
@@ -374,7 +600,6 @@ class ChamberProcess:
         except Exception as e:
             self._log(f"Ошибка сохранения PID в файл: {e}")
 
-
     def _program_loop(self):
         """Цикл выполнения программы с применением PID на этапе стабилизации."""
         try:
@@ -385,6 +610,10 @@ class ChamberProcess:
                 target = step['temperature']
                 rate = step['rate']
                 hold = step['hold_time'] * 60
+
+                # Сброс/инициализация данных выдержки для текущей ступени
+                self._pre_hold_start_time = None
+                self._current_hold_seconds = hold
 
                 # 1. Устанавливаем PID по умолчанию для нагрева
                 self.apply_preset()
@@ -404,6 +633,7 @@ class ChamberProcess:
                     break
 
                 self._update_data(process_status=ProcessStatus.STABILIZING)
+                self._log(f"Этап СТАБИЛИЗАЦИЯ (ступень {idx + 1}, цель {target}°C)")
                 if not self._stabilize_temperature(target):  # здесь будут применены сохранённые PID
                     self._update_data(process_status=ProcessStatus.ERROR)
                     break
@@ -423,6 +653,8 @@ class ChamberProcess:
             self._update_data(process_status=ProcessStatus.ERROR)
         finally:
             self.camera.turn_off_camera()
+
+
 
     def set_heating_rate(self, rate: float):
         """Установить скорость нагрева (USP) в терморегуляторе и сохранить."""
@@ -583,6 +815,7 @@ class ChamberProcess:
             self.epsilon_reach = params["epsilon_reach"]
         if "epsilon_stable" in params:
             self.epsilon_stable = params["epsilon_stable"]
+            self.epsilon_stable_simplified = self.epsilon_stable * self.epsilon_stable_simplified_multiplier
         if "stability_interval" in params:
             self.stability_interval = int(params["stability_interval"])
         if "pid_adjust_interval" in params:
@@ -639,6 +872,34 @@ class ChamberProcess:
             self._shaft_heating_interval_current = self.shaft_heating_interval
         if "auto_apply_pid" in params:
             self.auto_apply_pid = params["auto_apply_pid"]
+        # --- Таймауты стабилизации ---
+        if "stabilization_timeout_default" in params:
+            self.stabilization_timeout_default = float(params["stabilization_timeout_default"])
+        if "stabilization_timeout_saved" in params:
+            self.stabilization_timeout_saved = float(params["stabilization_timeout_saved"])
+
+        # --- Упрощённый критерий стабилизации ---
+        if "epsilon_stable_simplified_multiplier" in params:
+            self.epsilon_stable_simplified_multiplier = float(
+                params["epsilon_stable_simplified_multiplier"]
+            )
+            self.epsilon_stable_simplified = self.epsilon_stable * self.epsilon_stable_simplified_multiplier
+        if "required_stable_simplified" in params:
+            self.required_stable_simplified = int(params["required_stable_simplified"])
+
+        # --- Выход на режим ---
+        if "epsilon_reach_approach" in params:
+            self.epsilon_reach_approach = float(params["epsilon_reach_approach"])
+
+        # --- Вентилятор ---
+        if "FAN_MIN_RUNNING_SPEED" in params:
+            self.FAN_MIN_RUNNING_SPEED = float(params["FAN_MIN_RUNNING_SPEED"])
+
+        if "pre_hold_enabled" in params:
+            self.pre_hold_enabled = bool(params["pre_hold_enabled"])
+
+        if "min_p_value" in params:
+            self.min_p_value = float(params["min_p_value"])
 
 
     def _adjust_fan_speed(self):
@@ -738,6 +999,8 @@ class ChamberProcess:
             self._thread.join(timeout=5)
         self._thread = None
         self.camera.turn_off_camera()
+        self._pre_hold_start_time = None
+        self._current_hold_seconds = 0.0
         with self._lock:
             self.data.process_status = ProcessStatus.STOPPED
         self._log("Процесс остановлен")
@@ -780,7 +1043,9 @@ class ChamberProcess:
         start_time = time.time()
         # self.data.current_setpoint = target
         self._update_data(current_setpoint=target)
-
+        # Сброс/инициализация данных выдержки
+        self._pre_hold_start_time = None
+        self._current_hold_seconds = self._hold_minutes * 60
         # Этап 1: Выход на температуру
         self._update_data(process_status=ProcessStatus.HEATING, target_temp=target)
         self._log(f"Этап НАГРЕВ: целевая температура {target}°C")
@@ -812,135 +1077,216 @@ class ChamberProcess:
         self.camera.turn_off_camera()
 
     def _wait_for_target(self, target: float) -> bool:
+        """
+        Ожидание пересечения целевой температуры.
+
+        Триггер срабатывает, когда температура переходит с одной стороны уставки
+        на другую: (prev - target) и (current - target) имеют разные знаки
+        (или один из них равен нулю). Работает и при нагреве, и при охлаждении.
+
+        На время выхода на режим нагрев вала работает штатно — никаких
+        отключений, потому что нам важен только факт пересечения уставки.
+        """
         timeout = 3600
         start = time.time()
+        prev_temp = None
+
         while not self._stop_event.is_set() and (time.time() - start) < timeout:
             sensors = self._read_sensors()
-            # Проверка и запуск нагрева вала (с учётом интервала)
-            self._check_and_heat_shaft(sensors['current_temp'])
-            # Управление активной серией нагрева
-            self._manage_shaft_heating_series()
-
             self._update_data(**sensors)
             self._ensure_fan_running()
+            self._check_and_heat_shaft(sensors['current_temp'])
+            self._manage_shaft_heating_series()
+
             current = sensors['current_temp']
-            diff = abs(current - target)
-            self._log(f"НАГРЕВ: T={current:.2f}°C, цель={target:.2f}°C, разница={diff:.2f}°C")
-            if diff <= self.epsilon_reach:
-                return True
+            self._log(
+                f"НАГРЕВ: T={current:.2f}°C, цель={target:.2f}°C, "
+                f"разница={abs(current - target):.2f}°C"
+            )
+
+            if prev_temp is not None:
+                prev_diff = prev_temp - target
+                curr_diff = current - target
+                # Пересечение: знаки разные, или один из них ноль
+                if prev_diff * curr_diff <= 0:
+                    self._log(
+                        f"Пересечение целевой температуры: "
+                        f"{prev_temp:.2f}°C → {current:.2f}°C "
+                        f"(цель {target:.2f}°C). Переход к стабилизации."
+                    )
+                    return True
+
+            prev_temp = current
             time.sleep(self.update_interval)
+
+        self._log("Таймаут или остановка при ожидании пересечения температуры")
         return False
 
 
     def _stabilize_temperature(self, target: float) -> bool:
         """
-        Многоэтапная стабилизация температуры:
-        1. Установка начальных PID (P=5, I=10) и ожидание стабилизации.
-        2. Если температура не в допуске – подбор P (шаг 0.5 до 1.5) с ожиданием стабилизации.
-        3. Если не помогло – подбор I (шаг 1 до 7) с ожиданием стабилизации.
-        4. Если не помогло – коррекция уставки прибора (шаг max_correction) до попадания в допуск.
-        5. После попадания в допуск – дополнительная стабилизация.
-        6. Если включена регулировка вентилятора – подбор скорости для достижения целевого градиента
-           с ожиданием стабилизации после каждого изменения.
-        7. После подбора скорости – повторная проверка температуры и при необходимости коррекция уставки.
-        8. Финальная стабилизация и сохранение результатов в JSON.
+        Стабилизация температуры.
+
+        Последовательность:
+        1. Устанавливаем СТАНДАРТНЫЕ PID (P=5, I=10), уставку = target.
+           На время стабилизации ОТКЛЮЧАЕМ проверку температуры вала.
+        2. Ждём УПРОЩЁННУЮ стабилизацию
+           (epsilon_stable × 3, required = 3, timeout = stabilization_timeout_default).
+        3. Если упрощённая стабилизация ДОСТИГНУТА:
+           a. Пытаемся применить СОХРАНЁННЫЕ PID (temp_pid.json / ступень /
+              temp_program_pid.json).
+           b. Если сохранённые есть — применяем и ждём ПОЛНУЮ стабилизацию
+              с ними (timeout = stabilization_timeout_saved), затем при
+              необходимости корректируем уставку.
+           c. Если сохранённых нет — ПОЛНЫЙ ПОДБОР (P, I, коррекция уставки).
+        4. Если упрощённая стабилизация НЕ достигнута за отведённое время
+           — ПОЛНЫЙ ПОДБОР.
+        5. Финальная стабилизация, регулировка вентилятора, сохранение.
         """
-        # --- Шаг 1: Установка начальных PID и ожидание стабилизации ---
-        self._log("Установка начальных PID: P=5, I=10")
-        self.camera.set_pid_parameters(P=5.0, I=10, channel=0)
-        if not self._wait_for_stabilization(timeout=1800):
-            self._log("Ошибка: не удалось достичь стабилизации после установки PID")
-            self._update_data(process_status=ProcessStatus.ERROR)
-            self._log("Ошибка: не удалось стабилизировать температуру")
-            self.camera.turn_off_camera()
-            return False
+        # --- Отключаем проверку вала на всё время стабилизации ---
+        prev_shaft_check_enabled = self.shaft_check_enabled
+        self.shaft_check_enabled = False
+        self._reset_shaft_heating()
 
-        # Текущая температура после стабилизации
-        sensors = self._read_sensors()
-        current_temp = sensors['current_temp']
-        diff = abs(current_temp - target)
+        try:
+            # ============ ШАГ 1: Стандартные PID + уставка ============
+            self._log("Установка стандартных PID: P=5, I=10, уставка = target")
+            self.camera.set_pid_parameters(P=5.0, I=10, channel=0)
+            self.camera.set_temperature(target, channel=0)
+            self._current_setpoint = target
+            self._update_data(current_setpoint=target)
+            self.current_fan_speed = 1000
+            self.camera.set_fan_speed(1000)
 
-        # Если уже в допуске – сразу переходим к вентилятору
-        if diff <= self.epsilon_reach:
-            self._log(f"Температура в допуске с начальными PID: {current_temp:.2f}°C")
-        else:
+            # ============ ШАГ 2: Упрощённая стабилизация ============
             self._log(
-                f"Температура {current_temp:.2f}°C, отклонение {diff:.2f}°C > {self.epsilon_reach}. Начинаем подбор P.")
+                f"Ожидание УПРОЩЁННОЙ стабилизации "
+                f"(eps={self.epsilon_stable_simplified:.2f}, "
+                f"required={self.required_stable_simplified}, "
+                f"timeout={self.stabilization_timeout_default}s)"
+            )
+            simplified_ok = self._wait_for_stabilization(
+                timeout=self.stabilization_timeout_default,
+                epsilon_stable=self.epsilon_stable_simplified,
+                required_stable=self.required_stable_simplified
+            )
+            # === Флаг «Пред. выдержка»: старт отсчёта после первичной стабилизации ===
+            if simplified_ok and self.pre_hold_enabled and self._pre_hold_start_time is None:
+                self._pre_hold_start_time = time.time()
+                self._log(
+                    "Флаг 'Пред. выдержка' активен: отсчёт времени выдержки "
+                    "начат после первичной (упрощённой) стабилизации."
+                )
 
-            # --- Шаг 1.2: Проверка наличия сохранённых коэффициентов ---
-            used_saved_pid = False
-            saved_applied = False
+            tuning_done = False
 
-            # Пытаемся получить сохранённые параметры
-            if self._program is None:  # ручной режим
-                # _apply_pid_for_target сама применяет PID и возвращает True при успехе
-                if self._apply_pid_for_target(target):
-                    self._log("Применены сохранённые PID из файла ручного режима")
-                    saved_applied = True
-                else:
-                    saved_applied = False
-            else:  # программный режим
-                pid_data = self._load_pid_for_step(self.current_step_index, target)
-                if pid_data is not None:
-                    # Применяем загруженные параметры
-                    self.camera.set_pid_parameters(P=pid_data['p'], I=pid_data['i'], D=pid_data['d'], channel=0)
-                    if 'setpoint' in pid_data and pid_data['setpoint'] is not None:
-                        self.camera.set_temperature(pid_data['setpoint'], channel=0)
-                        self._current_setpoint = pid_data['setpoint']
-                        self._update_data(current_setpoint=self._current_setpoint)
-                    if 'fan_speed' in pid_data and pid_data['fan_speed'] is not None:
-                        self.camera.set_fan_speed(pid_data['fan_speed'])
-                        self.current_fan_speed = pid_data['fan_speed']
-                    self._log("Применены сохранённые PID из программы")
-                    saved_applied = True
-                else:
-                    saved_applied = False
+            if simplified_ok:
+                self._log("Упрощённая стабилизация достигнута. "
+                          "Попытка загрузить сохранённые PID.")
 
-            # Если сохранённые параметры были применены, пробуем стабилизироваться
-            if saved_applied:
-                self._log("Ожидание стабилизации с сохранёнными PID (макс. 5 мин)")
-                if self._wait_for_stabilization(timeout=300):
-                    sensors = self._read_sensors()
-                    current_temp = sensors['current_temp']
-                    diff = abs(current_temp - target)
+                # ============ ШАГ 3: Загрузка сохранённых PID ============
+                saved_applied = False
 
-                    if diff <= self.epsilon_reach:
-                        self._log("Температура в допуске. Переход к выдержке.")
-                        self._save_stabilization_results(target)
-                        self._save_current_pid()
-                        return True
+                if self._program is None:
+                    # Ручной режим — temp_pid.json
+                    if self._apply_pid_for_target(target):
+                        self._log("Применены сохранённые PID из temp_pid.json")
+                        saved_applied = True
                     else:
-                        self._log(f"Температура {current_temp:.2f}°C, отклонение {diff:.2f}°C. Пробуем коррекцию уставки.")
-                        if self._correct_setpoint_stepwise(target, current_temp):
-                            self._log("Коррекция уставки выполнена успешно")
-                            self._save_stabilization_results(target)
-                            self._save_current_pid()
-                            return True
-                        else:
-                            self._log("Коррекция уставки не удалась. Будет выполнен полный подбор.")
-                            used_saved_pid = False
+                        self._log("Сохранённых PID для ручного режима не найдено.")
                 else:
-                    self._log("Стабилизация с сохранёнными PID не удалась за 5 минут. Будет выполнен полный подбор.")
-                    used_saved_pid = False
-            else:
-                used_saved_pid = False
+                    # Программный режим — ступень / temp_program_pid.json
+                    pid_data = self._load_pid_for_step(self.current_step_index, target)
+                    if pid_data is not None:
+                        ok, msg = self.camera.set_pid_parameters(
+                            P=pid_data['p'], I=pid_data['i'], D=pid_data['d'], channel=0
+                        )
+                        if ok:
+                            if pid_data.get('setpoint') is not None:
+                                self.camera.set_temperature(pid_data['setpoint'], channel=0)
+                                self._current_setpoint = pid_data['setpoint']
+                                self._update_data(current_setpoint=self._current_setpoint)
+                            if pid_data.get('fan_speed') is not None:
+                                self.camera.set_fan_speed(pid_data['fan_speed'])
+                                self.current_fan_speed = pid_data['fan_speed']
+                            saved_applied = True
+                            self._log("Применены сохранённые PID из программы")
+                        else:
+                            self._log(
+                                f"Не удалось применить сохранённые PID: {msg}",
+                                level="ERROR"
+                            )
+                    else:
+                        self._log("Сохранённых PID для ступени не найдено.")
 
-            # Если не удалось использовать сохранённые PID (их нет или стабилизация не прошла) –
-            # переходим к полному подбору с начальными настройками.
-            if not used_saved_pid:
-                self._log("Возврат к начальным PID и уставке. Запуск полного цикла подбора.")
+                if saved_applied:
+                    # ============ ШАГ 3b: Полная стабилизация с сохранёнными PID ============
+                    self._log(
+                        f"Ожидание ПОЛНОЙ стабилизации с сохранёнными PID "
+                        f"(макс. {self.stabilization_timeout_saved / 60:.0f} мин)"
+                    )
+                    if self._wait_for_stabilization(timeout=self.stabilization_timeout_saved):
+                        sensors = self._read_sensors()
+                        current_temp = sensors['current_temp']
+                        diff = abs(current_temp - target)
+
+                        if diff <= self.epsilon_reach:
+                            self._log(
+                                f"Температура в допуске: {current_temp:.2f}°C "
+                                f"(отклонение {diff:.2f}°C)"
+                            )
+                            tuning_done = True
+                        else:
+                            self._log(
+                                f"Температура {current_temp:.2f}°C, "
+                                f"отклонение {diff:.2f}°C. Коррекция уставки."
+                            )
+                            if self._correct_setpoint_stepwise(target, current_temp):
+                                self._log("Коррекция уставки выполнена успешно")
+                                tuning_done = True
+                            else:
+                                self._log(
+                                    "Коррекция уставки не удалась. "
+                                    "Переход к полному подбору."
+                                )
+                    else:
+                        self._log(
+                            "Полная стабилизация с сохранёнными PID не удалась "
+                            "за отведённое время. Переход к полному подбору."
+                        )
+                else:
+                    self._log("Сохранённых PID нет. Запуск полного подбора.")
+            else:
+                self._log(
+                    "Упрощённая стабилизация НЕ достигнута за отведённое время. "
+                    "Запуск полного подбора."
+                )
+
+            # ============ ШАГ 4: Полный подбор ============
+            if not tuning_done:
+                self._log("Возврат к стандартным PID и целевой уставке. Полный подбор.")
                 self.camera.set_pid_parameters(P=5.0, I=10, channel=0)
                 self.camera.set_temperature(target, channel=0)
                 self._current_setpoint = target
                 self._update_data(current_setpoint=target)
                 self.current_fan_speed = 1000
                 self.camera.set_fan_speed(1000)
-                self._update_data(current_setpoint=self._current_setpoint)
 
-                # --- Шаг 2: Подбор P ---
+                if not self._wait_for_stabilization(timeout=self.stabilization_timeout_default):
+                    self._log("Ошибка стабилизации перед полным подбором")
+                    self._update_data(process_status=ProcessStatus.ERROR)
+                    self.camera.turn_off_camera()
+                    return False
+
+                sensors = self._read_sensors()
+                current_temp = sensors['current_temp']
+                diff = abs(current_temp - target)
+
+                # --- Подбор P ---
                 p_value = 5.0
-                while p_value > 1.5 and diff > self.epsilon_reach and not self._stop_event.is_set():
-                    p_value = max(1.5, p_value - 0.5)
+                while (p_value > self.min_p_value and diff > self.epsilon_reach
+                       and not self._stop_event.is_set()):
+                    p_value = max(self.min_p_value, p_value - 0.5)
                     self._log(f"Установка P = {p_value:.2f}")
                     self.camera.set_pid_parameters(P=p_value, channel=0)
                     if not self._wait_for_stabilization(timeout=600):
@@ -949,16 +1295,18 @@ class ChamberProcess:
                     sensors = self._read_sensors()
                     current_temp = sensors['current_temp']
                     diff = abs(current_temp - target)
-                    self._log(f"После P={p_value:.2f} температура {current_temp:.2f}°C, отклонение {diff:.2f}°C")
+                    self._log(f"После P={p_value:.2f} T={current_temp:.2f}°C, "
+                              f"отклонение {diff:.2f}°C")
 
                 if diff <= self.epsilon_reach:
                     self._log("Температура в допуске после подбора P")
                 else:
-                    self._log("P достигло минимума, но отклонение всё ещё велико. Начинаем подбор I.")
+                    self._log("P достигло минимума. Начинаем подбор I.")
 
-                    # --- Шаг 3: Подбор I (исправлено зацикливание) ---
+                    # --- Подбор I ---
                     i_value = 10
-                    while i_value > 7 and diff > self.epsilon_reach and not self._stop_event.is_set():
+                    while (i_value > 7 and diff > self.epsilon_reach
+                           and not self._stop_event.is_set()):
                         i_value -= 1
                         self._log(f"Установка I = {i_value}")
                         self.camera.set_pid_parameters(I=i_value, channel=0)
@@ -968,452 +1316,215 @@ class ChamberProcess:
                         sensors = self._read_sensors()
                         current_temp = sensors['current_temp']
                         diff = abs(current_temp - target)
-                        self._log(f"После I={i_value} температура {current_temp:.2f}°C, отклонение {diff:.2f}°C")
+                        self._log(f"После I={i_value} T={current_temp:.2f}°C, "
+                                  f"отклонение {diff:.2f}°C")
 
                     if diff <= self.epsilon_reach:
                         self._log("Температура в допуске после подбора I")
                     else:
-                        self._log("I достигло минимума, начинаем коррекцию уставки.")
+                        self._log("I достигло минимума. Коррекция уставки.")
 
-                        # --- Шаг 4: Коррекция уставки прибора ---
+                        # --- Коррекция уставки ---
                         if not self._correct_setpoint_stepwise(target, current_temp):
                             self._log("Не удалось достичь допуска после коррекции уставки")
                             return False
 
-        # --- Шаг 5: Дополнительная стабилизация после достижения допуска ---
-        self._log("Ожидание финальной стабилизации перед регулировкой вентилятора")
-        if not self._wait_for_stabilization(timeout=600):
-            self._log("Ошибка финальной стабилизации")
-            return False
+            # ============ ШАГ 5: Финальная стабилизация перед вентилятором ============
+            self._log("Ожидание финальной стабилизации перед регулировкой вентилятора")
+            if not self._wait_for_stabilization(timeout=600):
+                self._log("Ошибка финальной стабилизации")
+                return False
 
-        # --- Шаг 5.5: Предварительная корректировка скорости вентилятора ---
-        skip_main_fan_adjustment = False  # флаг пропуска основного подбора
+            # ============ ШАГ 6: Предварительная корректировка вентилятора ============
+            skip_main_fan_adjustment = False
 
-        if self.fan_control_enabled and self.current_fan_speed < 2500:
-            self._log("Предварительная корректировка: увеличиваем скорость на 1000 об/мин")
+            if self.fan_control_enabled and self.current_fan_speed < 2500:
+                self._log("Предварительная корректировка: +1000 об/мин")
 
-            # 1. Запоминаем модуль градиента до изменения
-            grad_before_raw, msg = self.camera.get_gradient()
-            if grad_before_raw is None:
-                self._log(f"Не удалось измерить градиент до изменения: {msg}. Пропускаем предкоррекцию.")
-            else:
-                abs_grad_before = abs(grad_before_raw)
-                old_speed = self.current_fan_speed
-                new_speed = old_speed + 1000
-
-                success, msg = self.camera.set_fan_speed(new_speed)
-                if not success:
-                    self._log(f"Не удалось увеличить скорость: {msg}. Продолжаем без предкоррекции.")
+                grad_before_raw, msg = self.camera.get_gradient()
+                if grad_before_raw is None:
+                    self._log(f"Не удалось измерить градиент до изменения: {msg}. "
+                              f"Пропускаем предкоррекцию.")
                 else:
-                    self.current_fan_speed = new_speed
-                    self._log(f"Скорость увеличена до {new_speed}, ожидание стабилизации...")
-
-                    # 2. Ждём стабилизацию
-                    if not self._wait_for_stabilization(timeout=600):
-                        self._log("Стабилизация после увеличения скорости не удалась, возвращаем исходную скорость.")
-                        self.camera.set_fan_speed(old_speed)
-                        self.current_fan_speed = old_speed
-                    else:
-                        # 3. Измеряем градиент после
-                        grad_after_raw, msg = self.camera.get_gradient()
-                        if grad_after_raw is None:
-                            self._log(
-                                f"Не удалось измерить градиент после изменения: {msg}. Возвращаем исходную скорость.")
-                            self.camera.set_fan_speed(old_speed)
-                            self.current_fan_speed = old_speed
-                        else:
-                            abs_grad_after = abs(grad_after_raw)
-                            delta = abs(abs_grad_after - abs_grad_before)
-                            self._log(
-                                f"Модуль градиента до: {abs_grad_before:.2f}°C, после: {abs_grad_after:.2f}°C, изменение: {delta:.2f}°C")
-
-                            # 4. Если изменение незначительное, возвращаем старую скорость и пропускаем основной подбор
-                            if delta <= 0.3:
-                                self._log(
-                                    "Изменение незначительное (≤0.3°C), возвращаем исходную скорость и пропускаем основной подбор вентилятора.")
-                                self.camera.set_fan_speed(old_speed)
-                                self.current_fan_speed = old_speed
-                                skip_main_fan_adjustment = True
-                            else:
-                                self._log(
-                                    "Изменение существенное (>0.3°C), оставляем новую скорость и переходим к основному подбору.")
-                                # Оставляем новую скорость, основной подбор будет выполняться
-
-        # --- Шаг 6: Регулировка скорости вентилятора (если включена) ---
-        if self.fan_control_enabled and not skip_main_fan_adjustment:
-            self._log("Начинаем подбор скорости вентилятора для достижения целевого градиента")
-            grad, _ = self.camera.get_gradient()
-            if grad is None:
-                self._log("Не удалось измерить градиент, пропускаем регулировку вентилятора")
-            else:
-                abs_grad = abs(grad)
-                max_fan_attempts = 20
-                fan_attempt = 0
-                # Будем подбирать, пока градиент не войдёт в диапазон ±0.5 от target_gradient
-                while abs(
-                        abs_grad - self.target_gradient) > 0.5 and fan_attempt < max_fan_attempts and not self._stop_event.is_set():
-                    if abs_grad > self.target_gradient:
-                        new_speed = min(self.current_fan_speed + 100, self.max_fan_speed)
-                        self._log(
-                            f"Градиент {abs_grad:.2f} > {self.target_gradient}, увеличиваем скорость до {new_speed}")
-                    else:
-                        new_speed = max(self.current_fan_speed - 100, self.min_fan_speed)
-                        self._log(
-                            f"Градиент {abs_grad:.2f} < {self.target_gradient}, уменьшаем скорость до {new_speed}")
+                    abs_grad_before = abs(grad_before_raw)
+                    old_speed = self.current_fan_speed
+                    new_speed = old_speed + 1000
 
                     success, msg = self.camera.set_fan_speed(new_speed)
                     if not success:
-                        self._log(f"Ошибка установки скорости: {msg}")
-                        break
-                    self.current_fan_speed = new_speed
-
-                    # Ждём стабилизации температуры после изменения скорости
-                    if not self._wait_for_stabilization(timeout=600):
-                        self._log("Ошибка стабилизации после изменения скорости вентилятора")
-                        return False
-
-                    grad, _ = self.camera.get_gradient()
-                    if grad is None:
-                        self._log("Не удалось измерить градиент, прекращаем подбор")
-                        break
-                    abs_grad = abs(grad)
-                    fan_attempt += 1
-                    self._log(f"После изменения скорости градиент = {abs_grad:.2f}°C")
-
-                if abs(abs_grad - self.target_gradient) <= 0.5:
-                    self._log(f"Градиент достиг целевого диапазона: {abs_grad:.2f}°C")
-                else:
-                    self._log("Не удалось точно настроить градиент, продолжаем с текущим")
-
-            # --- Шаг 7: После регулировки вентилятора проверяем температуру и при необходимости корректируем уставку ---
-            sensors = self._read_sensors()
-            current_temp = sensors['current_temp']
-            if not self._correct_setpoint_stepwise(target, current_temp):
-                self._log("Не удалось вернуть температуру в допуск после регулировки вентилятора")
-                return False
-        # --- Шаг 8: Финальная стабилизация и сохранение результатов ---
-        self._log("Финальная стабилизация перед выдержкой")
-        if not self._wait_for_stabilization(timeout=600):
-            self._log("Ошибка финальной стабилизации")
-            return False
-
-        # Сохраняем результаты
-        self._save_stabilization_results(target)
-        self._save_current_pid()
-        return True
-
-
-    def _stabilize_temperature_1(self, target: float) -> bool:
-        """
-        Многоэтапная стабилизация температуры:
-        1. Установка начальных PID (P=5, I=10) и ожидание стабилизации.
-        2. Если температура не в допуске – подбор P (шаг 0.5 до 1.5) с ожиданием стабилизации.
-        3. Если не помогло – подбор I (шаг 1 до 7) с ожиданием стабилизации.
-        4. Если не помогло – коррекция уставки прибора (шаг max_correction) до попадания в допуск.
-        5. После попадания в допуск – дополнительная стабилизация.
-        6. Если включена регулировка вентилятора – подбор скорости для достижения целевого градиента
-           с ожиданием стабилизации после каждого изменения.
-        7. После подбора скорости – повторная проверка температуры и при необходимости коррекция уставки.
-        8. Финальная стабилизация и сохранение результатов в JSON.
-        """
-        # --- Шаг 1: Установка начальных PID и ожидание стабилизации ---
-        self._log("Установка начальных PID: P=5, I=10")
-        self.camera.set_pid_parameters(P=5.0, I=10, channel=0)
-        if not self._wait_for_stabilization(timeout=1800):
-            self._log("Ошибка: не удалось достичь стабилизации после установки PID")
-            self._update_data(process_status=ProcessStatus.ERROR)
-            self._log("Ошибка: не удалось стабилизировать температуру")
-            self.camera.turn_off_camera()
-            return False
-
-        # Текущая температура после стабилизации
-        sensors = self._read_sensors()
-        current_temp = sensors['current_temp']
-        diff = abs(current_temp - target)
-
-        # Если уже в допуске – сразу переходим к вентилятору
-        if diff <= self.epsilon_reach:
-            self._log(f"Температура в допуске с начальными PID: {current_temp:.2f}°C")
-        else:
-            self._log(
-                f"Температура {current_temp:.2f}°C, отклонение {diff:.2f}°C > {self.epsilon_reach}. Начинаем подбор P.")
-            # --- Шаг 1.2: Проверка наличия сохранённых коэффициентов ---
-            saved_available = False
-            used_saved_pid = False  # <-- добавить эту строку
-            if self._program is None:  # ручной режим
-                if os.path.exists(self._temp_pid_file):
-                    try:
-                        with open(self._temp_pid_file, 'r', encoding='utf-8') as f:
-                            data = json.load(f)
-                        key = str(round(target, 1))
-                        if key in data:
-                            saved_available = True
-                    except Exception:
-                        pass
-            else:  # программный режим
-                '''
-                step = self._program.steps[self.current_step_index]
-                if 'pid_p' in step and 'pid_i' in step and 'pid_d' in step:
-                    saved_available = True
-                '''
-                pid_data = self._load_pid_for_step(self.current_step_index, target)
-                if pid_data is not None:
-                    self._log("Обнаружены сохранённые PID. Применяем...")
-                    self.camera.set_pid_parameters(P=pid_data['p'], I=pid_data['i'], D=pid_data['d'], channel=0)
-                    if 'setpoint' in pid_data and pid_data['setpoint'] is not None:
-                        self.camera.set_temperature(pid_data['setpoint'], channel=0)
-                        self._current_setpoint = pid_data['setpoint']
-                        self._update_data(current_setpoint=self._current_setpoint)
-                    if 'fan_speed' in pid_data and pid_data['fan_speed'] is not None:
-                        self.camera.set_fan_speed(pid_data['fan_speed'])
-                        self.current_fan_speed = pid_data['fan_speed']
-
-            # Применяем сохранённые коэффициенты, если они есть
-            if saved_available:
-                self._log("Обнаружены сохранённые коэффициенты. Применяем...")
-                if self._program is None:
-                    self._apply_pid_for_target(target)
-                else:
-                    current_step = self._program.steps[self.current_step_index]  # явное получение
-                    self._apply_pid_from_step(current_step)
-                # Ожидание стабилизации с таймаутом 5 минут
-                if self._wait_for_stabilization(timeout=300):
-                    used_saved_pid = True
-                    self._log("Стабилизация с сохранёнными коэффициентами выполнена успешно")
-
-                    # Обновляем текущую температуру
-                    sensors = self._read_sensors()
-                    current_temp = sensors['current_temp']
-                    diff = abs(current_temp - target)
-
-                    if diff <= self.epsilon_reach:
-                        self._log("Температура в допуске. Переход к выдержке.")
-                        # Сохраняем результаты и выходим (подбор не требуется)
-                        self._save_stabilization_results(target)
-                        self._save_current_pid()
-                        return True
+                        self._log(f"Не удалось увеличить скорость: {msg}. "
+                                  f"Продолжаем без предкоррекции.")
                     else:
-                        self._log(
-                            f"Температура {current_temp:.2f}°C, отклонение {diff:.2f}°C. Запуск коррекции уставки.")
-                        # Запускаем коррекцию уставки
-                        if self._correct_setpoint_stepwise(target, current_temp):
-                            self._log("Коррекция уставки выполнена успешно")
-                            self._save_stabilization_results(target)
-                            self._save_current_pid()
-                            return True
-                        else:
-                            self._log("Коррекция уставки не удалась. Переход к полному подбору.")
-                            used_saved_pid = False  # не используем сохранённые дальше
-                else:
-                    self._log(
-                        "Стабилизация с сохранёнными коэффициентами не удалась за 5 минут. Возврат к начальным PID.")
-                # Если сохранённых нет или они не помогли – возвращаемся к начальным настройкам и запускаем полный подбор
-            if not used_saved_pid:
-                self._log("Возврат к начальным PID и уставке. Запуск полного цикла подбора.")
-                self.camera.set_pid_parameters(P=5.0, I=10, channel=0)
-                self.camera.set_temperature(target, channel=0)
-                self._current_setpoint = target
-                self._update_data(current_setpoint=target)
-                self.current_fan_speed = 1000
-                self.camera.set_fan_speed(1000)
-                self._update_data(current_setpoint=self._current_setpoint)
+                        self.current_fan_speed = new_speed
+                        self._log(f"Скорость увеличена до {new_speed}, "
+                                  f"ожидание стабилизации...")
 
-                # --- Шаг 2: Подбор P ---
-            p_value = 5.0
-            while p_value > 1.5 and diff > self.epsilon_reach and not self._stop_event.is_set():
-                p_value = max(1.5, p_value - 0.5)
-                self._log(f"Установка P = {p_value:.2f}")
-                self.camera.set_pid_parameters(P=p_value, channel=0)
-                if not self._wait_for_stabilization(timeout=600):
-                    self._log("Ошибка стабилизации после изменения P")
-                    return False
+                        if not self._wait_for_stabilization(timeout=600):
+                            self._log("Стабилизация после увеличения скорости "
+                                      "не удалась, возвращаем исходную скорость.")
+                            self.camera.set_fan_speed(old_speed)
+                            self.current_fan_speed = old_speed
+                        else:
+                            grad_after_raw, msg = self.camera.get_gradient()
+                            if grad_after_raw is None:
+                                self._log(f"Не удалось измерить градиент после "
+                                          f"изменения: {msg}. Возвращаем исходную скорость.")
+                                self.camera.set_fan_speed(old_speed)
+                                self.current_fan_speed = old_speed
+                            else:
+                                abs_grad_after = abs(grad_after_raw)
+                                delta = abs(abs_grad_after - abs_grad_before)
+                                self._log(
+                                    f"|grad| до: {abs_grad_before:.2f}°C, "
+                                    f"после: {abs_grad_after:.2f}°C, "
+                                    f"изменение: {delta:.2f}°C"
+                                )
+                                if delta <= 0.3:
+                                    self._log(
+                                        "Изменение незначительное (≤0.3°C), "
+                                        "возвращаем исходную скорость и пропускаем "
+                                        "основной подбор."
+                                    )
+                                    self.camera.set_fan_speed(old_speed)
+                                    self.current_fan_speed = old_speed
+                                    skip_main_fan_adjustment = True
+                                else:
+                                    self._log("Изменение существенное (>0.3°C), "
+                                              "оставляем новую скорость.")
+
+            # ============ ШАГ 7: Основной подбор скорости вентилятора ============
+            if self.fan_control_enabled and not skip_main_fan_adjustment:
+                self._log("Подбор скорости вентилятора по целевому градиенту")
+                grad, _ = self.camera.get_gradient()
+                if grad is None:
+                    self._log("Не удалось измерить градиент — пропуск регулировки")
+                else:
+                    abs_grad = abs(grad)
+                    max_fan_attempts = 20
+                    fan_attempt = 0
+
+                    while (abs(abs_grad - self.target_gradient) > 0.5
+                           and fan_attempt < max_fan_attempts
+                           and not self._stop_event.is_set()):
+                        if abs_grad > self.target_gradient:
+                            new_speed = min(self.current_fan_speed + 100, self.max_fan_speed)
+                            self._log(f"Градиент {abs_grad:.2f} > "
+                                      f"{self.target_gradient}, увеличиваем до {new_speed}")
+                        else:
+                            new_speed = max(self.current_fan_speed - 100, self.min_fan_speed)
+                            self._log(f"Градиент {abs_grad:.2f} < "
+                                      f"{self.target_gradient}, уменьшаем до {new_speed}")
+
+                        success, msg = self.camera.set_fan_speed(new_speed)
+                        if not success:
+                            self._log(f"Ошибка установки скорости: {msg}")
+                            break
+                        self.current_fan_speed = new_speed
+
+                        if not self._wait_for_stabilization(timeout=600):
+                            self._log("Ошибка стабилизации после смены скорости")
+                            return False
+
+                        grad, _ = self.camera.get_gradient()
+                        if grad is None:
+                            self._log("Не удалось измерить градиент — прекращаем подбор")
+                            break
+                        abs_grad = abs(grad)
+                        fan_attempt += 1
+                        self._log(f"После смены скорости градиент = {abs_grad:.2f}°C")
+
+                    if abs(abs_grad - self.target_gradient) <= 0.5:
+                        self._log(f"Градиент достиг целевого диапазона: {abs_grad:.2f}°C")
+                    else:
+                        self._log("Не удалось точно настроить градиент")
+
+                # Проверка температуры после вентилятора
                 sensors = self._read_sensors()
                 current_temp = sensors['current_temp']
-                diff = abs(current_temp - target)
-                self._log(f"После P={p_value:.2f} температура {current_temp:.2f}°C, отклонение {diff:.2f}°C")
+                if not self._correct_setpoint_stepwise(target, current_temp):
+                    self._log("Не удалось вернуть температуру в допуск после "
+                              "регулировки вентилятора")
+                    return False
 
-            if diff <= self.epsilon_reach:
-                self._log("Температура в допуске после подбора P")
-            else:
-                self._log("P достигло минимума, но отклонение всё ещё велико. Начинаем подбор I.")
-
-                # --- Шаг 3: Подбор I (исправлено зацикливание) ---
-                i_value = 10
-                while i_value > 7 and diff > self.epsilon_reach and not self._stop_event.is_set():
-                    i_value -= 1
-                    self._log(f"Установка I = {i_value}")
-                    self.camera.set_pid_parameters(I=i_value, channel=0)
-                    if not self._wait_for_stabilization(timeout=600):
-                        self._log("Ошибка стабилизации после изменения I")
-                        return False
-                    sensors = self._read_sensors()
-                    current_temp = sensors['current_temp']
-                    diff = abs(current_temp - target)
-                    self._log(f"После I={i_value} температура {current_temp:.2f}°C, отклонение {diff:.2f}°C")
-
-                if diff <= self.epsilon_reach:
-                    self._log("Температура в допуске после подбора I")
-                else:
-                    self._log("I достигло минимума, начинаем коррекцию уставки.")
-
-                    # --- Шаг 4: Коррекция уставки прибора ---
-                    if not self._correct_setpoint_stepwise(target, current_temp):
-                        self._log("Не удалось достичь допуска после коррекции уставки")
-                        return False
-
-        # --- Шаг 5: Дополнительная стабилизация после достижения допуска ---
-        self._log("Ожидание финальной стабилизации перед регулировкой вентилятора")
-        if not self._wait_for_stabilization(timeout=600):
-            self._log("Ошибка финальной стабилизации")
-            return False
-
-        # --- Шаг 5.5: Предварительная корректировка скорости вентилятора ---
-        skip_main_fan_adjustment = False  # флаг пропуска основного подбора
-
-        if self.fan_control_enabled and self.current_fan_speed < 2500:
-            self._log("Предварительная корректировка: увеличиваем скорость на 1000 об/мин")
-
-            # 1. Запоминаем модуль градиента до изменения
-            grad_before_raw, msg = self.camera.get_gradient()
-            if grad_before_raw is None:
-                self._log(f"Не удалось измерить градиент до изменения: {msg}. Пропускаем предкоррекцию.")
-            else:
-                abs_grad_before = abs(grad_before_raw)
-                old_speed = self.current_fan_speed
-                new_speed = old_speed + 1000
-
-                success, msg = self.camera.set_fan_speed(new_speed)
-                if not success:
-                    self._log(f"Не удалось увеличить скорость: {msg}. Продолжаем без предкоррекции.")
-                else:
-                    self.current_fan_speed = new_speed
-                    self._log(f"Скорость увеличена до {new_speed}, ожидание стабилизации...")
-
-                    # 2. Ждём стабилизацию
-                    if not self._wait_for_stabilization(timeout=600):
-                        self._log("Стабилизация после увеличения скорости не удалась, возвращаем исходную скорость.")
-                        self.camera.set_fan_speed(old_speed)
-                        self.current_fan_speed = old_speed
-                    else:
-                        # 3. Измеряем градиент после
-                        grad_after_raw, msg = self.camera.get_gradient()
-                        if grad_after_raw is None:
-                            self._log(
-                                f"Не удалось измерить градиент после изменения: {msg}. Возвращаем исходную скорость.")
-                            self.camera.set_fan_speed(old_speed)
-                            self.current_fan_speed = old_speed
-                        else:
-                            abs_grad_after = abs(grad_after_raw)
-                            delta = abs(abs_grad_after - abs_grad_before)
-                            self._log(
-                                f"Модуль градиента до: {abs_grad_before:.2f}°C, после: {abs_grad_after:.2f}°C, изменение: {delta:.2f}°C")
-
-                            # 4. Если изменение незначительное, возвращаем старую скорость и пропускаем основной подбор
-                            if delta <= 0.3:
-                                self._log(
-                                    "Изменение незначительное (≤0.3°C), возвращаем исходную скорость и пропускаем основной подбор вентилятора.")
-                                self.camera.set_fan_speed(old_speed)
-                                self.current_fan_speed = old_speed
-                                skip_main_fan_adjustment = True
-                            else:
-                                self._log(
-                                    "Изменение существенное (>0.3°C), оставляем новую скорость и переходим к основному подбору.")
-                                # Оставляем новую скорость, основной подбор будет выполняться
-
-        # --- Шаг 6: Регулировка скорости вентилятора (если включена) ---
-        if self.fan_control_enabled and not skip_main_fan_adjustment:
-            self._log("Начинаем подбор скорости вентилятора для достижения целевого градиента")
-            grad, _ = self.camera.get_gradient()
-            if grad is None:
-                self._log("Не удалось измерить градиент, пропускаем регулировку вентилятора")
-            else:
-                abs_grad = abs(grad)
-                max_fan_attempts = 20
-                fan_attempt = 0
-                # Будем подбирать, пока градиент не войдёт в диапазон ±0.5 от target_gradient
-                while abs(
-                        abs_grad - self.target_gradient) > 0.5 and fan_attempt < max_fan_attempts and not self._stop_event.is_set():
-                    if abs_grad > self.target_gradient:
-                        new_speed = min(self.current_fan_speed + 100, self.max_fan_speed)
-                        self._log(
-                            f"Градиент {abs_grad:.2f} > {self.target_gradient}, увеличиваем скорость до {new_speed}")
-                    else:
-                        new_speed = max(self.current_fan_speed - 100, self.min_fan_speed)
-                        self._log(
-                            f"Градиент {abs_grad:.2f} < {self.target_gradient}, уменьшаем скорость до {new_speed}")
-
-                    success, msg = self.camera.set_fan_speed(new_speed)
-                    if not success:
-                        self._log(f"Ошибка установки скорости: {msg}")
-                        break
-                    self.current_fan_speed = new_speed
-
-                    # Ждём стабилизации температуры после изменения скорости
-                    if not self._wait_for_stabilization(timeout=600):
-                        self._log("Ошибка стабилизации после изменения скорости вентилятора")
-                        return False
-
-                    grad, _ = self.camera.get_gradient()
-                    if grad is None:
-                        self._log("Не удалось измерить градиент, прекращаем подбор")
-                        break
-                    abs_grad = abs(grad)
-                    fan_attempt += 1
-                    self._log(f"После изменения скорости градиент = {abs_grad:.2f}°C")
-
-                if abs(abs_grad - self.target_gradient) <= 0.5:
-                    self._log(f"Градиент достиг целевого диапазона: {abs_grad:.2f}°C")
-                else:
-                    self._log("Не удалось точно настроить градиент, продолжаем с текущим")
-
-            # --- Шаг 7: После регулировки вентилятора проверяем температуру и при необходимости корректируем уставку ---
-            sensors = self._read_sensors()
-            current_temp = sensors['current_temp']
-            if not self._correct_setpoint_stepwise(target, current_temp):
-                self._log("Не удалось вернуть температуру в допуск после регулировки вентилятора")
+            # ============ ШАГ 8: Финальная стабилизация и сохранение ============
+            self._log("Финальная стабилизация перед выдержкой")
+            if not self._wait_for_stabilization(timeout=600):
+                self._log("Ошибка финальной стабилизации")
                 return False
-        # --- Шаг 8: Финальная стабилизация и сохранение результатов ---
-        self._log("Финальная стабилизация перед выдержкой")
-        if not self._wait_for_stabilization(timeout=600):
-            self._log("Ошибка финальной стабилизации")
-            return False
 
-        # Сохраняем результаты
-        self._save_stabilization_results(target)
-        self._save_current_pid()
-        return True
+            self._save_stabilization_results(target)
+            self._save_current_pid()
+            return True
 
-    def _wait_for_stabilization(self, timeout: float = 1800) -> bool:
-        """
-        Ожидает, пока температура не станет стабильной в течение заданного числа интервалов.
-        Критерий: изменение температуры за stability_interval не превышает epsilon_stable,
-        и таких отсчётов подряд не менее 5.
-        Возвращает True, если стабилизация достигнута, иначе False.
-        """
+        finally:
+            # --- Возвращаем проверку вала ---
+            self.shaft_check_enabled = prev_shaft_check_enabled
+
+
+
+
+    def _wait_for_stabilization(self, timeout: float = 1800,
+                                epsilon_stable: float = None,
+                                required_stable: int = None) -> bool:
+        if epsilon_stable is None:
+            epsilon_stable = self.epsilon_stable
+        if required_stable is None:
+            required_stable = 5
+
         start = time.time()
         stable_count = 0
         prev_temp = None
-        required_stable = 5  # количество последовательных стабильных измерений
 
         while not self._stop_event.is_set() and (time.time() - start) < timeout:
             sensors = self._read_sensors()
             current_temp = sensors['current_temp']
             self._update_data(**sensors)
+            # Обновляем остаток выдержки, если отсчёт уже стартовал (флаг «Пред. выдержка»)
+            if self._pre_hold_start_time is not None and self._current_hold_seconds > 0:
+                elapsed = time.time() - self._pre_hold_start_time
+                remaining = max(0.0, self._current_hold_seconds - elapsed)
+                self._update_data(hold_remaining=remaining)
+
+            # Проверяем вентилятор КАЖДУЮ итерацию
             self._ensure_fan_running()
+
+            # Фактические обороты: если < порога — замер не учитываем
+            fan_speed = sensors.get('fan_speed') or 0
+            fan_ok = (fan_speed >= getattr(self, 'FAN_MIN_RUNNING_SPEED', 50)
+                      if self.fan_control_enabled else True)
+
             self._check_and_heat_shaft(current_temp)
             self._manage_shaft_heating_series()
 
+            if not fan_ok:
+                if stable_count > 0:
+                    self._log(
+                        f"СТАБИЛИЗАЦИЯ: T={current_temp:.2f}°C, "
+                        f"вентилятор {fan_speed} об/мин — счётчик сброшен",
+                        level="WARNING"
+                    )
+                stable_count = 0
+                prev_temp = current_temp
+                time.sleep(self.stability_interval)
+                continue
+
             if prev_temp is not None:
                 delta = abs(current_temp - prev_temp)
-                if delta <= self.epsilon_stable:
+                if delta <= epsilon_stable:
                     stable_count += 1
-                    self._log(f"СТАБИЛИЗАЦИЯ: T={current_temp:.2f}°C, стабильность {stable_count}/{required_stable}")
+                    self._log(
+                        f"СТАБИЛИЗАЦИЯ: T={current_temp:.2f}°C, "
+                        f"стабильность {stable_count}/{required_stable} "
+                        f"(eps={epsilon_stable:.2f})"
+                    )
                     if stable_count >= required_stable:
                         return True
                 else:
                     stable_count = 0
                     self._log(
-                        f"СТАБИЛИЗАЦИЯ: T={current_temp:.2f}°C, изменение {delta:.2f} > {self.epsilon_stable}, сброс счётчика")
+                        f"СТАБИЛИЗАЦИЯ: T={current_temp:.2f}°C, изменение "
+                        f"{delta:.2f} > {epsilon_stable:.2f}, сброс счётчика"
+                    )
             else:
                 self._log(f"СТАБИЛИЗАЦИЯ: первое измерение T={current_temp:.2f}°C")
 
@@ -1424,6 +1535,49 @@ class ChamberProcess:
         return False
 
     def _save_stabilization_results(self, target_temp: float):
+        """
+        Сохраняет итоговые параметры стабилизации в JSON-файл.
+        Файл: stabilization_results.json (в рабочей директории).
+        Добавляет запись в массив.
+        """
+        sensors = self._read_sensors()
+        result = {
+            "timestamp": datetime.now().isoformat(),
+            "step_index": (self.current_step_index
+                           if self._program and self.current_step_index is not None
+                           else -1),
+            "target_temperature": target_temp,
+            "final_temperature": sensors['current_temp'],
+            "final_p": sensors['p_value'],
+            "final_i": sensors['i_value'],
+            "final_setpoint": self._current_setpoint,
+            "final_fan_speed": self.current_fan_speed,
+            "gradient": sensors['gradient']
+        }
+        filename = "stabilization_results.json"
+
+        try:
+            data = self._safe_load_json(filename, default=[])
+            if not isinstance(data, list):
+                # на случай, если в файле был одиночный объект или мусор
+                data = [data] if isinstance(data, dict) else []
+
+            data.append(result)
+
+            # атомарная запись
+            tmp = filename + ".tmp"
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+            os.replace(tmp, filename)
+
+            step_no = (self.current_step_index + 1
+                       if self.current_step_index is not None
+                       else '')
+            self._log(f"Результаты стабилизации ступени {step_no} сохранены в {filename}")
+        except Exception as e:
+            self._log(f"Ошибка сохранения результатов стабилизации: {e}")
+
+    def _save_stabilization_results_1(self, target_temp: float):
         """
         Сохраняет итоговые параметры стабилизации в JSON-файл.
         Файл: stabilization_results.json (в рабочей директории)
@@ -1528,12 +1682,31 @@ class ChamberProcess:
         Целевая температура – пользовательская уставка target.
         Коррекция уставки прибора производится пошагово с шагом не более max_correction,
         с ожиданием стабилизации после каждого шага.
+
+        Если включён флаг «Пред. выдержка» и первичная стабилизация уже
+        завершилась ранее — отсчёт ведётся с момента её окончания.
         """
-        start_hold = time.time()
+        if self.pre_hold_enabled and self._pre_hold_start_time is not None:
+            start_hold = self._pre_hold_start_time
+            elapsed = time.time() - start_hold
+            self._log(
+                f"Пред. выдержка: отсчёт ведётся с момента окончания "
+                f"первичной стабилизации (уже прошло {elapsed / 60:.1f} мин)."
+            )
+            # Если время уже истекло на этапе стабилизации — выдержку пропускаем
+            if elapsed >= duration:
+                self._log(
+                    f"Время выдержки уже истекло во время стабилизации "
+                    f"({elapsed / 60:.1f} мин >= {duration / 60:.1f} мин). "
+                    f"Этап выдержки пропущен."
+                )
+                self._update_data(hold_remaining=0)
+                return
+        else:
+            start_hold = time.time()
+
         last_correction_time = 0
         user_target = target
-
-
 
         while not self._stop_event.is_set() and (time.time() - start_hold) < duration:
             elapsed = time.time() - start_hold
@@ -1556,6 +1729,7 @@ class ChamberProcess:
                 self._correct_setpoint_stepwise(user_target, current)
                 last_correction_time = time.time()
             time.sleep(self.update_interval)
+
 
 
 
