@@ -2,6 +2,7 @@ import json
 import os
 import time
 import threading
+from collections import deque
 from typing import Optional
 from datetime import datetime
 
@@ -112,6 +113,37 @@ class ChamberProcess:
         self._current_hold_seconds = 0.0  # длительность текущей выдержки (для GUI)
 
         self.min_p_value = 1.5
+
+        # История для предсказания (используется в smart_hold_temperature и detect_load_change)
+        self._temp_history = deque(maxlen=10)
+        self._time_history = deque(maxlen=10)
+
+        # === Параметры умного подхода к температуре ===
+        self.smart_approach_enabled = True  # Включение умного подхода
+        self.deceleration_zone = 2.0  # Зона начального торможения (°C)
+        self.fine_zone = 0.5  # Зона точной настройки (°C)
+        self.braking_factor = 0.7  # Коэффициент торможения (0.5-0.9)
+        self.prediction_horizon = 10.0  # Горизонт предсказания (секунды)
+
+        # === Параметры адаптивной стабилизации (Вариант 2) ===
+        self.adaptive_stabilization_enabled = True  # Включение адаптивной стабилизации
+        self.base_p = 8.0  # Базовый P коэффициент
+        self.base_i = 15  # Базовый I коэффициент
+        self.base_d = 50  # Базовый D коэффициент
+        self.temp_range = 200  # Диапазон температур для масштабирования
+
+        # === Параметры интеллектуального удержания (Вариант 3) ===
+        self.smart_hold_enabled = True  # Включение интеллектуального удержания
+        self.kp_adaptive = 0.5  # Пропорциональный коэффициент для адаптивной коррекции
+        self.ki_adaptive = 0.01  # Интегральный коэффициент
+        self.kd_adaptive = 2.0  # Дифференциальный коэффициент
+
+        # === Параметры адаптивного управления нагрузкой (Вариант 4) ===
+        self.load_adaptation_enabled = True  # Включение адаптации к нагрузке
+        self.velocity_change_threshold = 0.5  # Порог изменения скорости для обнаружения нагрузки
+        self.load_adaptation_factor_p = 1.5  # Множитель P при изменении нагрузки
+        self.load_adaptation_factor_i = 0.8  # Множитель I при изменении нагрузки
+        self.load_adaptation_factor_d = 1.3  # Множитель D при изменении нагрузки
 
     def _load_pid_for_step(self, step_index: int, target_temp: float) -> Optional[dict]:
         """
@@ -704,7 +736,7 @@ class ChamberProcess:
 
                 self._update_data(process_status=ProcessStatus.STABILIZING)
                 self._log(f"Этап СТАБИЛИЗАЦИЯ (ступень {idx + 1}, цель {target}°C)")
-                if not self._stabilize_temperature(target):  # здесь будут применены сохранённые PID
+                if not (self._adaptive_stabilize_temperature(target) if self.adaptive_stabilization_enabled else self._stabilize_temperature(target)):  # здесь будут применены сохранённые PID
                     self._update_data(process_status=ProcessStatus.ERROR)
                     break
 
@@ -1000,6 +1032,52 @@ class ChamberProcess:
         if "pre_hold_enabled" in params:
             self.pre_hold_enabled = bool(params["pre_hold_enabled"])
 
+        # === Параметры умного подхода ===
+        if "smart_approach_enabled" in params:
+            self.smart_approach_enabled = bool(params["smart_approach_enabled"])
+        if "deceleration_zone" in params:
+            self.deceleration_zone = float(params["deceleration_zone"])
+        if "fine_zone" in params:
+            self.fine_zone = float(params["fine_zone"])
+        if "braking_factor" in params:
+            self.braking_factor = float(params["braking_factor"])
+        if "prediction_horizon" in params:
+            self.prediction_horizon = float(params["prediction_horizon"])
+
+        # === Параметры адаптивной стабилизации ===
+        if "adaptive_stabilization_enabled" in params:
+            self.adaptive_stabilization_enabled = bool(params["adaptive_stabilization_enabled"])
+        if "base_p" in params:
+            self.base_p = float(params["base_p"])
+        if "base_i" in params:
+            self.base_i = float(params["base_i"])
+        if "base_d" in params:
+            self.base_d = float(params["base_d"])
+        if "temp_range" in params:
+            self.temp_range = float(params["temp_range"])
+
+        # === Параметры интеллектуального удержания ===
+        if "smart_hold_enabled" in params:
+            self.smart_hold_enabled = bool(params["smart_hold_enabled"])
+        if "kp_adaptive" in params:
+            self.kp_adaptive = float(params["kp_adaptive"])
+        if "ki_adaptive" in params:
+            self.ki_adaptive = float(params["ki_adaptive"])
+        if "kd_adaptive" in params:
+            self.kd_adaptive = float(params["kd_adaptive"])
+
+        # === Параметры адаптивного управления нагрузкой ===
+        if "load_adaptation_enabled" in params:
+            self.load_adaptation_enabled = bool(params["load_adaptation_enabled"])
+        if "velocity_change_threshold" in params:
+            self.velocity_change_threshold = float(params["velocity_change_threshold"])
+        if "load_adaptation_factor_p" in params:
+            self.load_adaptation_factor_p = float(params["load_adaptation_factor_p"])
+        if "load_adaptation_factor_i" in params:
+            self.load_adaptation_factor_i = float(params["load_adaptation_factor_i"])
+        if "load_adaptation_factor_d" in params:
+            self.load_adaptation_factor_d = float(params["load_adaptation_factor_d"])
+
         if "min_p_value" in params:
             val = float(params["min_p_value"])
             self.min_p_value = max(0.1, val)  # защита от 0 и отрицательных
@@ -1183,7 +1261,7 @@ class ChamberProcess:
         # Этап 1: Выход на температуру
         self._update_data(process_status=ProcessStatus.HEATING, target_temp=target)
         self._log(f"Этап НАГРЕВ: целевая температура {target}°C")
-        if not self._wait_for_target(target):
+        if not self._smart_wait_for_target(target):
             self._update_data(process_status=ProcessStatus.ERROR)
             self._log("Ошибка: не удалось достичь целевой температуры")
             self.camera.turn_off_camera()
@@ -1193,7 +1271,7 @@ class ChamberProcess:
         # Этап 2: Стабилизация
         self._update_data(process_status=ProcessStatus.STABILIZING)
         self._log("Этап СТАБИЛИЗАЦИЯ")
-        if not self._stabilize_temperature(target):
+        if not (self._adaptive_stabilize_temperature(target) if self.adaptive_stabilization_enabled else self._stabilize_temperature(target)):
             self._update_data(process_status=ProcessStatus.ERROR)
             self._log("Ошибка: не удалось стабилизировать температуру")
             self.camera.turn_off_camera()
@@ -1203,7 +1281,7 @@ class ChamberProcess:
         # Этап 3: Выдержка
         self._update_data(process_status=ProcessStatus.HOLDING)
         self._log(f"Этап ВЫДЕРЖКА: {self._hold_minutes} мин")
-        self._hold_temperature(target, hold_seconds)
+        (self._smart_hold_temperature(target, hold_seconds) if self.smart_hold_enabled else self._hold_temperature(target, hold_seconds))
 
         # Завершение
         self._update_data(process_status=ProcessStatus.COMPLETED)
@@ -1254,6 +1332,96 @@ class ChamberProcess:
             time.sleep(self.update_interval)
 
         self._log("Таймаут или остановка при ожидании пересечения температуры")
+        self._log("Таймаут иди остановка при ожидании пересечения температуры")
+        return False
+
+    def _smart_wait_for_target(self, target: float) -> bool:
+        """
+        Умное ожидание достижения целевой температуры с предсказанием и плавным подходом.
+        
+        Использует линейную экстраполяцию для предсказания момента достижения целевой температуры
+        и плавного торможения перед ней, чтобы избежать перерегулирования.
+        """
+        if not self.smart_approach_enabled:
+            return self._wait_for_target(target)
+
+        timeout = 3600
+        start = time.time()
+        prev_temp = None
+        prev_time = time.time()
+        velocity_history = deque(maxlen=5)
+
+        while not self._stop_event.is_set() and (time.time() - start) < timeout:
+            sensors = self._read_sensors()
+            current = sensors['current_temp']
+            current_time = time.time()
+
+            self._update_data(**sensors)
+            self._ensure_fan_running()
+            self._check_and_heat_shaft(current)
+            self._manage_shaft_heating_series()
+
+            # Вычисляем скорость изменения температуры
+            if prev_temp is not None and (current_time - prev_time) > 0:
+                velocity = (current - prev_temp) / (current_time - prev_time)
+                velocity_history.append(velocity)
+
+            # Обновляем историю для обнаружения изменения нагрузки
+            self._temp_history.append(current)
+            self._time_history.append(current_time)
+
+            prev_temp = current
+            prev_time = current_time
+
+            # Проверяем изменение нагрузки
+            if self._detect_load_change(current, avg_velocity if velocity_history else 0):
+                self._adapt_to_load_change(target)
+
+            # Средняя скорость за последние N измерений
+            avg_velocity = sum(velocity_history) / len(velocity_history) if velocity_history else 0
+
+            # Предсказываем температуру через prediction_horizon секунд
+            if avg_velocity != 0:
+                predicted_temp = current + avg_velocity * self.prediction_horizon
+            else:
+                predicted_temp = current
+
+            self._log(
+                f"НАГРЕВ: T={current:.2f}°C, цель={target:.2f}°C, "
+                f"скорость={avg_velocity:.2f}°C/с, предск={predicted_temp:.2f}°C"
+            )
+
+            diff = abs(current - target)
+
+            # Зона торможения
+            if diff < self.deceleration_zone and avg_velocity > 0.05:
+                lookahead_temp = current + avg_velocity * 2
+
+                if lookahead_temp > target:
+                    new_setpoint = target - (lookahead_temp - target) * self.braking_factor
+                    new_setpoint = max(new_setpoint, target - 1.0)
+                    self.camera.set_temperature(new_setpoint, channel=0)
+                    self._current_setpoint = new_setpoint
+                    self._update_data(current_setpoint=new_setpoint)
+                    self._log(f"Торможение: setpoint = {new_setpoint:.2f}°C")
+
+            # Зона точной настройки
+            if diff < self.fine_zone:
+                self._log(f"Достигнута зона точной настройки ({diff:.2f} < {self.fine_zone:.2f})")
+                return True
+
+            # Проверка пересечения (fallback)
+            if prev_temp is not None:
+                prev_diff = prev_temp - target
+                curr_diff = current - target
+
+                if prev_diff * curr_diff <= 0 and diff < 1.0:
+                    self._log(f"Пересечение целевой температуры: {prev_temp:.2f} → {current:.2f}°C")
+                    return True
+
+            time.sleep(self.update_interval)
+
+        self._log("Таймаут иди остановка при ожидании пересечения температуры")
         return False
 
 
@@ -1603,6 +1771,113 @@ class ChamberProcess:
 
 
 
+    def _adaptive_stabilize_temperature(self, target: float) -> bool:
+        """
+        Адаптивная стабилизация с динамической настройкой PID параметров.
+        
+        Использует адаптивные PID параметры в зависимости от целевой температуры
+        и условий работы камеры.
+        """
+        if not self.adaptive_stabilization_enabled:
+            return self._stabilize_temperature(target)
+
+        # Сохраняем текущее состояние
+        prev_shaft_check_enabled = self.shaft_check_enabled
+        self.shaft_check_enabled = False
+        self._reset_shaft_heating()
+
+        try:
+            # === Фаза 1: Быстрое приближение с адаптивными PID ===
+            self._log("=== Фаза 1: Быстрое приближение с адаптивными PID ===")
+            
+            # Настраиваем PID в зависимости от целевой температуры
+            p_factor = 1.0 + (target / self.temp_range) * 0.5
+            i_factor = 1.0 + (target / self.temp_range) * 0.3
+            d_factor = 1.0 + (target / self.temp_range) * 0.2
+
+            p = self.base_p * p_factor
+            i = self.base_i * i_factor
+            d = self.base_d * d_factor
+
+            self.camera.set_pid_parameters(P=p, I=i, D=d, channel=0)
+            self.camera.set_temperature(target, channel=0)
+            self._current_setpoint = target
+            self._update_data(current_setpoint=target)
+
+            default_fan = self._get_default_fan_speed(target)
+            self.current_fan_speed = default_fan
+            self.camera.set_fan_speed(default_fan)
+
+            self._log(f"Адаптивные PID параметры: P={p:.1f}, I={i:.1f}, D={d:.1f}")
+
+            # Ждём первичной стабилизации с более мягкими критериями
+            if not self._wait_for_stabilization(
+                timeout=900,  # 15 минут
+                epsilon_stable=0.3,  # Более мягкий критерий
+                required_stable=5
+            ):
+                self._log("Не удалось достичь первичной стабилизации")
+                return False
+
+            self._log("Первичная стабилизация достигнута")
+
+            # === Фаза 2: Тонкая настройка с сохраненными PID ===
+            self._log("=== Фаза 2: Тонкая настройка ===")
+
+            # Загружаем сохранённые PID параметры для этой температуры
+            if self._program is None:
+                if self._apply_pid_for_target(target):
+                    self._log("Применены сохранённые PID параметры из temp_pid.json")
+                else:
+                    # Если нет сохранённых параметров, используем улучшенные стандартные
+                    improved_p = 3.0
+                    improved_i = 8
+                    improved_d = 100
+                    self.camera.set_pid_parameters(
+                        P=improved_p, I=improved_i, D=improved_d, channel=0
+                    )
+                    self._log(f"Используем улучшенные стандартные PID: P={improved_p}, I={improved_i}, D={improved_d}")
+            else:
+                # Для программного режима
+                pid_data = self._load_pid_for_step(self.current_step_index, target)
+                if pid_data:
+                    ok, msg = self.camera.set_pid_parameters(
+                        P=pid_data['p'], I=pid_data['i'], D=pid_data['d'], channel=0
+                    )
+                    if ok:
+                        if pid_data.get('setpoint') is not None:
+                            self.camera.set_temperature(pid_data['setpoint'], channel=0)
+                            self._current_setpoint = pid_data['setpoint']
+                            self._update_data(current_setpoint=self._current_setpoint)
+                        if pid_data.get('fan_speed') is not None:
+                            self.camera.set_fan_speed(pid_data['fan_speed'])
+                            self.current_fan_speed = pid_data['fan_speed']
+                        self._log("Применены PID параметры из программы")
+                    else:
+                        self._log(f"Не удалось применить PID: {msg}", level="ERROR")
+                else:
+                    self._log("PID параметры для программы не найдены")
+
+            # Ждём точной стабилизации
+            if not self._wait_for_stabilization(
+                timeout=self.stabilization_timeout_saved,  # 15 минут
+                epsilon_stable=self.epsilon_stable,
+                required_stable=5
+            ):
+                self._log("Не удалось достичь точной стабилизации")
+                return False
+
+            self._log("Точная стабилизация достигнута")
+
+            # === Фаза 3: Оптимизация (опционально) ===
+            if self.auto_apply_pid:
+                self._save_stabilization_results(target)
+
+            return True
+
+        finally:
+            self.shaft_check_enabled = prev_shaft_check_enabled
+
     def _wait_for_stabilization(self, timeout: float = 1800,
                                 epsilon_stable: float = None,
                                 required_stable: int = None) -> bool:
@@ -1869,6 +2144,196 @@ class ChamberProcess:
                 self._correct_setpoint_stepwise(user_target, current)
                 last_correction_time = time.time()
             time.sleep(self.update_interval)
+
+    def _smart_hold_temperature(self, target: float, duration: float):
+        """
+        Интеллектуальное удержание температуры с предсказанием и адаптацией.
+        
+        Использует предсказательную коррекцию на основе:
+        - Текущего отклонения
+        - Скорости изменения
+        - Тренда (второе производное)
+        - Адаптивного управления вентилятором
+        """
+        if not self.smart_hold_enabled:
+            return self._hold_temperature(target, duration)
+
+        if self.pre_hold_enabled and self._pre_hold_start_time is not None:
+            start_hold = self._pre_hold_start_time
+            elapsed = time.time() - start_hold
+            self._log(
+                f"Пред. выдержка: время истекло ({elapsed / 60:.1f} мин). "
+                f"Начата выдержка при достигнутой стабильности."
+            )
+            self._update_data(hold_remaining=0)
+            start_hold = time.time()
+            duration = self._current_hold_seconds
+        else:
+            start_hold = time.time()
+
+        # История для предсказания
+        temp_history = deque(maxlen=10)
+        time_history = deque(maxlen=10)
+
+        # Параметры адаптивного управления
+        integral_error = 0.0
+        last_error = 0.0
+        last_correction_time = 0
+        last_fan_adjust_time = 0
+
+        while not self._stop_event.is_set() and (time.time() - start_hold) < duration:
+            elapsed = time.time() - start_hold
+            remaining = duration - elapsed
+            sensors = self._read_sensors()
+            current = sensors['current_temp']
+            current_time = time.time()
+
+            # Обновляем историю
+            temp_history.append(current)
+            time_history.append(current_time)
+
+            self._update_data(**sensors, hold_remaining=remaining)
+            self._ensure_fan_running()
+            self._check_and_heat_shaft(current)
+            self._manage_shaft_heating_series()
+
+            diff = abs(current - target)
+            error = current - target
+
+            self._log(
+                f"ВЫДЕРЖКА: T={current:.2f}°C, цель={target:.2f}°C, "
+                f"разница={diff:.2f}°C, осталось={remaining / 60:.1f} мин"
+            )
+
+            # === Предсказание тренда ===
+            if len(temp_history) >= 3:
+                # Вычисляем скорость изменения
+                if len(time_history) >= 2 and (time_history[-1] - time_history[-2]) > 0:
+                    velocity = (temp_history[-1] - temp_history[-2]) / (time_history[-1] - time_history[-2])
+                else:
+                    velocity = 0
+
+                # Вычисляем ускорение
+                if len(time_history) >= 3:
+                    dt1 = time_history[-1] - time_history[-2]
+                    dt2 = time_history[-2] - time_history[-3]
+                    if dt1 > 0 and dt2 > 0:
+                        acceleration = ((temp_history[-1] - temp_history[-2]) / dt1 -
+                                       (temp_history[-2] - temp_history[-3]) / dt2) / ((dt1 + dt2) / 2)
+                    else:
+                        acceleration = 0
+                else:
+                    acceleration = 0
+
+                # Предсказываем температуру через prediction_horizon секунд
+                predicted_temp = current + velocity * self.prediction_horizon + 0.5 * acceleration * (self.prediction_horizon ** 2)
+                predicted_error = predicted_temp - target
+
+                self._log(
+                    f"Предсказание: через {self.prediction_horizon:.0f}с T={predicted_temp:.2f}°C, "
+                    f"скорость={velocity:.3f}°C/с, ускорение={acceleration:.4f}°C/с²"
+                )
+
+                # === Адаптивная коррекция ===
+                now = time.time()
+
+                # Корректируем setpoint на основе предсказания
+                if now - last_correction_time >= self.correction_cooldown:
+                    # Используем ПИД-регулятор для коррекции
+                    p_term = self.kp_adaptive * error
+                    integral_error += error * (now - last_correction_time)
+                    i_term = self.ki_adaptive * integral_error
+
+                    if last_error != 0 and (now - last_correction_time) > 0:
+                        d_term = self.kd_adaptive * (error - last_error) / (now - last_correction_time)
+                    else:
+                        d_term = 0
+
+                    # Общая коррекция
+                    correction = p_term + i_term + d_term
+                    correction = max(-self.max_correction, min(self.max_correction, correction))
+
+                    # Применяем коррекцию только если предсказанная ошибка значительна
+                    if abs(predicted_error) > self.epsilon_reach or abs(error) > self.epsilon_reach:
+                        new_setpoint = target + correction
+                        self.camera.set_temperature(new_setpoint, channel=0)
+                        self._current_setpoint = new_setpoint
+                        self._update_data(current_setpoint=new_setpoint)
+
+                        self._log(
+                            f"Коррекция setpoint: {self._current_setpoint:.2f} → {new_setpoint:.2f}°C "
+                            f"(P={p_term:.3f}, I={i_term:.3f}, D={d_term:.3f})"
+                        )
+                        last_correction_time = now
+                        last_error = error
+
+                # === Адаптивное управление вентилятором ===
+                if self.fan_control_enabled and now - last_fan_adjust_time >= self.fan_adjust_interval:
+                    if diff < self.epsilon_stable and abs(velocity) < 0.05:
+                        # Температура стабильна - уменьшаем вентилятор для экономии энергии
+                        new_fan_speed = max(self.min_fan_speed, self.current_fan_speed - 100)
+                        if new_fan_speed < self.current_fan_speed:
+                            self.camera.set_fan_speed(new_fan_speed)
+                            self.current_fan_speed = new_fan_speed
+                            self._log(f"Уменьшение скорости вентилятора: {self.current_fan_speed + 100} → {new_fan_speed} об/мин")
+                            last_fan_adjust_time = now
+                    elif diff > self.epsilon_reach * 2 and velocity > 0.1:
+                        # Температура растёт слишком быстро - увеличиваем вентилятор
+                        new_fan_speed = min(self.max_fan_speed, self.current_fan_speed + 100)
+                        if new_fan_speed > self.current_fan_speed:
+                            self.camera.set_fan_speed(new_fan_speed)
+                            self.current_fan_speed = new_fan_speed
+                            self._log(f"Увеличение скорости вентилятора: {self.current_fan_speed - 100} → {new_fan_speed} об/мин")
+                            last_fan_adjust_time = now
+
+            time.sleep(self.update_interval)
+
+    def _detect_load_change(self, current_temp: float, velocity: float) -> bool:
+        """
+        Обнаружение изменения нагрузки по резкому изменению температуры или скорости.
+        """
+        if not self.load_adaptation_enabled:
+            return False
+
+        if len(self._temp_history) < 3:
+            return False
+
+        # Вычисляем среднюю скорость за последние N измерений
+        recent_velocities = []
+        for i in range(1, len(self._temp_history)):
+            if self._time_history[i] - self._time_history[i-1] > 0:
+                v = (self._temp_history[i] - self._temp_history[i-1]) / (self._time_history[i] - self._time_history[i-1])
+                recent_velocities.append(v)
+
+        if not recent_velocities:
+            return False
+
+        avg_velocity = sum(recent_velocities) / len(recent_velocities)
+        velocity_change = abs(velocity - avg_velocity)
+
+        # Если скорость изменилась резко
+        if velocity_change > self.velocity_change_threshold:
+            self._log(f"Обнаружено изменение нагрузки! Δv = {velocity_change:.2f}°C/с")
+            return True
+
+        return False
+
+    def _adapt_to_load_change(self, target: float):
+        """
+        Адаптация PID параметров при изменении нагрузки.
+        """
+        if not self.load_adaptation_enabled:
+            return
+
+        # Увеличиваем P и D для более быстрого отклика
+        current_pid = self.camera.get_pid_parameters(channel=0) or {}
+
+        new_p = current_pid.get('P', self.base_p) * self.load_adaptation_factor_p
+        new_i = current_pid.get('I', self.base_i) * self.load_adaptation_factor_i
+        new_d = current_pid.get('D', self.base_d) * self.load_adaptation_factor_d
+
+        self.camera.set_pid_parameters(P=new_p, I=new_i, D=new_d, channel=0)
+        self._log(f"Адаптация к изменению нагрузки: P={new_p:.1f}, I={new_i:.1f}, D={new_d:.1f}")
 
     def apply_preset(self):
         """Установка рекомендуемых параметров PID и скорости нагрева."""
