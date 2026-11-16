@@ -218,6 +218,43 @@ class MotorGUI:
 
     def _get_temperature_data_from_device(self):
         """
+        Получение температуры вала.
+        Приоритет: значение из ChamberProcess (если процесс запущен),
+        иначе — прямое измерение через драйвер.
+        """
+        if not self.driver:
+            self.device_error = "Драйвер не установлен"
+            return {}
+
+        # 1. Пробуем кэш процесса
+        try:
+            from Ports_COM.Devices_Data import DEVICES_DATA
+            gui = DEVICES_DATA.get_owen_gui()
+            process = getattr(gui, "chamber_process", None) if gui else None
+            if process is not None and process.is_running():
+                data = process.get_data()
+                # В ChamberData есть current_temp — но это температура камеры.
+                # Для температуры вала используем last_shaft_temp из процесса (кэш).
+                shaft_temp = getattr(process, "last_shaft_temp", None)
+                if shaft_temp is not None:
+                    return {'shaft_temperature': float(shaft_temp),
+                            'temp_message': 'из кэша процесса'}
+        except Exception as e:
+            print(f"MotorGUI: ошибка чтения из процесса: {e}")
+
+        # 2. Прямое измерение (только если процесс не идёт)
+        try:
+            shaft_temp, temp_msg = self.driver.get_shaft_temperature()
+            return {
+                'shaft_temperature': shaft_temp if shaft_temp is not None else 0.0,
+                'temp_message': temp_msg
+            }
+        except Exception as e:
+            self.device_error = f"Ошибка чтения температуры: {str(e)}"
+            return {}
+
+    def _get_temperature_data_from_device_old(self):
+        """
         Получение данных о температуре с устройства (раз в 60 секунд).
         """
         if not self.driver:
@@ -333,6 +370,34 @@ class MotorGUI:
             print("Драйвер не установлен")
 
     def _update_normal_display(self):
+        try:
+            dpg = self.dpg
+            if dpg.does_item_exist(f"{self.tag}_current_speed_val"):
+                dpg.set_value(f"{self.tag}_current_speed_val", f"{self.current_speed:4d} об/мин")
+            if dpg.does_item_exist(f"{self.tag}_setpoint_speed_val"):
+                display_setpoint = self.setpoint_speed if self.setpoint_speed > 0 else self.current_speed
+                dpg.set_value(f"{self.tag}_setpoint_speed_val", f"{display_setpoint:4d} об/мин")
+            if dpg.does_item_exist(f"{self.tag}_status_val"):
+                dpg.set_value(f"{self.tag}_status_val", self.status.value)
+            if dpg.does_item_exist(f"{self.tag}_current_val"):
+                dpg.set_value(f"{self.tag}_current_val", f"{self.motor_current:3.1f} мА")
+            if dpg.does_item_exist(f"{self.tag}_time_val"):
+                elapsed = time.time() - self.start_time
+                hours = int(elapsed // 3600)
+                minutes = int((elapsed % 3600) // 60)
+                seconds = int(elapsed % 60)
+                dpg.set_value(f"{self.tag}_time_val", f"{hours:02d}:{minutes:02d}:{seconds:02d}")
+
+            if self.status == MotorStatus.ERROR:
+                if dpg.does_item_exist(f"{self.tag}_status_panel"):
+                    dpg.bind_item_theme(f"{self.tag}_status_panel", "motor_alarm_theme")
+            else:
+                if dpg.does_item_exist(f"{self.tag}_status_panel"):
+                    dpg.bind_item_theme(f"{self.tag}_status_panel", "motor_status_theme")
+        except Exception as e:
+            print(f"Ошибка обновления отображения основных параметров: {e}")
+
+    def _update_normal_display_old(self):
         """Обновление отображения основных параметров"""
         try:
             dpg = self.dpg
@@ -593,6 +658,40 @@ class MotorGUI:
             print("Поток обновления данных двигателя остановлен")
 
     def _update_loop(self):
+        """
+        Цикл обновления данных:
+          - основные параметры: каждые 2 секунды (get_fan_speed/get_current/get_status/set_speed);
+          - температура вала: раз в shaft_temp_update_interval (60 сек по умолчанию).
+        """
+        normal_interval = 2
+        normal_counter = 0
+        temp_counter = 0
+
+        while self.running:
+            try:
+                normal_counter += 1
+                temp_counter += 1
+
+                if normal_counter >= normal_interval:
+                    try:
+                        self.update_normal_data()
+                    except Exception as e:
+                        print(f"MotorGUI normal update: {e}")
+                    normal_counter = 0
+
+                if temp_counter >= self.shaft_temp_update_interval:
+                    try:
+                        self.update_temperature_data()
+                    except Exception as e:
+                        print(f"MotorGUI temp update: {e}")
+                    temp_counter = 0
+
+                time.sleep(1)
+            except Exception as e:
+                print(f"Ошибка в потоке обновления двигателя: {e}")
+                time.sleep(1)
+
+    def _update_loop_old(self):
         """
         Цикл обновления данных с разными интервалами:
         - Основные параметры: каждые 2 секунды

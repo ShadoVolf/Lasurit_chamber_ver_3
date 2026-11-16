@@ -236,6 +236,111 @@ class ChamberProcess:
         Проверяет состояние вентилятора и перезапускает при остановке.
 
         Признаки остановки (любой из):
+          * get_speed() < FAN_MIN_RUNNING_SPEED;
+          * get_status() == 0 (СТОП);
+          * оба чтения вернули None (нет ответа от BLSD-20).
+
+        При ошибке записи/запуска _last_fan_ensure_time сбрасывается в 0,
+        чтобы следующая попытка была сразу.
+        """
+        if not self.is_running():
+            return
+
+        now = time.time()
+        if now - self._last_fan_ensure_time < self.FAN_ENSURE_INTERVAL:
+            return
+        self._last_fan_ensure_time = now
+
+        if not (self.camera.blsd20 and getattr(self.camera.blsd20, 'connected', False)):
+            self._log("Вентилятор: BLSD-20 не подключён — проверка пропущена",
+                      level="WARNING")
+            return
+
+        actual_speed = None
+        status_val = None
+        read_failed = False
+
+        try:
+            actual_speed = self.camera.get_fan_speed()
+        except Exception as e:
+            self._log(f"Ошибка чтения оборотов вентилятора: {e}", level="ERROR")
+
+        try:
+            status_raw = self.camera.blsd20.get_status()
+            try:
+                status_val = int(status_raw) if status_raw is not None else None
+            except (TypeError, ValueError):
+                status_val = None
+        except Exception as e:
+            self._log(f"Ошибка чтения статуса вентилятора: {e}", level="ERROR")
+
+        if actual_speed is None and status_val is None:
+            read_failed = True
+
+        self._log(
+            f"Проверка вентилятора: факт. обороты={actual_speed}, "
+            f"статус={status_val}, уставка={self.current_fan_speed}",
+            level="DEBUG"
+        )
+
+        threshold = getattr(self, 'FAN_MIN_RUNNING_SPEED', 50)
+        reasons = []
+        if actual_speed is not None and actual_speed < threshold:
+            reasons.append(f"обороты {actual_speed} < {threshold}")
+        if status_val == 0:
+            reasons.append("статус = СТОП")
+        if read_failed:
+            reasons.append("нет ответа от BLSD-20 (оба чтения None)")
+
+        if not reasons:
+            return
+
+        self._log(
+            f"ВНИМАНИЕ: вентилятор остановлен/нет связи ({', '.join(reasons)}). "
+            f"Перезапуск на {self.current_fan_speed} об/мин...",
+            level="WARNING"
+        )
+
+        ok_speed, msg = self.camera.set_fan_speed(self.current_fan_speed)
+        if not ok_speed:
+            self._log(f"Не удалось установить скорость: {msg}", level="ERROR")
+            self._last_fan_ensure_time = 0
+            return
+
+        try:
+            ok_start = self.camera.blsd20.start_motor()
+        except Exception as e:
+            self._log(f"Исключение при запуске двигателя: {e}", level="ERROR")
+            self._last_fan_ensure_time = 0
+            return
+
+        if not ok_start:
+            self._log("start_motor() вернул False", level="ERROR")
+            self._last_fan_ensure_time = 0
+            return
+
+        time.sleep(1.5)
+
+        try:
+            new_speed = self.camera.get_fan_speed()
+        except Exception:
+            new_speed = None
+
+        if new_speed is None or new_speed < threshold:
+            self._log(
+                f"Вентилятор НЕ раскрутился (speed={new_speed}). Будет повторная попытка.",
+                level="ERROR"
+            )
+            self._last_fan_ensure_time = 0
+            return
+
+        self._log(f"Вентилятор перезапущен. Фактические обороты: {new_speed}")
+
+    def _ensure_fan_running_old(self):
+        """
+        Проверяет состояние вентилятора и перезапускает при остановке.
+
+        Признаки остановки (любой из):
           * get_speed() < FAN_MIN_RUNNING_SPEED (фактические обороты);
           * get_status() == 0 (СТОП).
 
@@ -373,10 +478,14 @@ class ChamberProcess:
                 self._log(f"Ошибка сохранения программы во временный файл: {e}")
 
         self.apply_preset()
-        self.current_fan_speed = 1000
-        self.camera.set_fan_speed(1000)
 
         first_step = program.steps[0]
+        default_fan = self._get_default_fan_speed(first_step['temperature'])
+        self.current_fan_speed = default_fan
+        self.camera.set_fan_speed(default_fan)
+        self._log(f"Скорость вентилятора по умолчанию: {default_fan} об/мин "
+                  f"(цель {first_step['temperature']}°C)")
+
         self.camera.set_temperature(first_step['temperature'], channel=0)
         self.camera.turn_on_camera()
         self._log(f"Запуск программы из {len(program.steps)} ступеней")
@@ -384,45 +493,6 @@ class ChamberProcess:
         self._thread = threading.Thread(target=self._program_loop, daemon=True)
         self._thread.start()
 
-    def start_program_1(self, program: TemperatureProgram, program_file: Optional[str] = None):
-        """Запуск программы с возможным путём к файлу."""
-        if self.is_running():
-            raise RuntimeError("Процесс уже запущен")
-        self._program = program
-        self._program_file = program_file
-        self.current_step_index = 0
-        self._stop_event.clear()
-
-        # Если программа временная (нет файла) и существует временный файл программы,
-        # загружаем из него ступени и заменяем ими текущую программу.
-        if program_file is None and os.path.exists(self.temp_program_pid_file):
-            try:
-                with open(self.temp_program_pid_file, 'r', encoding='utf-8') as f:
-                    saved_steps = json.load(f)
-                if saved_steps and isinstance(saved_steps, list):
-                    self._program.steps = saved_steps
-                    self._log(f"Загружена программа из {self.temp_program_pid_file} ({len(saved_steps)} ступеней)")
-            except Exception as e:
-                self._log(f"Ошибка загрузки временного файла программы: {e}")
-
-        # --- НОВЫЙ БЛОК: сохраняем программу во временный файл при запуске (для временных программ) ---
-        if program_file is None:
-            try:
-                with open(self.temp_program_pid_file, 'w', encoding='utf-8') as f:
-                    json.dump(self._program.steps, f, indent=2, ensure_ascii=False)
-                self._log(f"Программа сохранена в {self.temp_program_pid_file}")
-            except Exception as e:
-                self._log(f"Ошибка сохранения программы во временный файл: {e}")
-
-        self.apply_preset()
-        self.current_fan_speed = 1000
-        self.camera.set_fan_speed(1000)
-        first_step = program.steps[0]
-        self.camera.set_temperature(first_step['temperature'], channel=0)
-        self.camera.turn_on_camera()
-        self._log(f"Запуск программы из {len(program.steps)} ступеней")
-        self._thread = threading.Thread(target=self._program_loop, daemon=True)
-        self._thread.start()
 
     def _apply_pid_for_target(self, target_temp: float) -> bool:
         """Загрузить PID из temp_pid.json для целевой температуры и применить.
@@ -662,6 +732,23 @@ class ChamberProcess:
             self.camera.set_temperature_rate(rate, channel=0)
         self._heating_rate = rate  # сохраняем
 
+    def _get_default_fan_speed(self, target_temp: float) -> int:
+        """
+        Скорость вентилятора по умолчанию в зависимости от целевой температуры:
+          * target <= +25 °C  → 1000 об/мин
+          * +25 < target <= +60 → 1500 об/мин
+          * target > +60       → 2000 об/мин
+        """
+        try:
+            t = float(target_temp)
+        except (TypeError, ValueError):
+            return 1000
+        if t <= 25.0:
+            return 1000
+        if t <= 60.0:
+            return 1500
+        return 2000
+
     def get_heating_rate(self) -> float:
         """Получить текущую скорость нагрева из устройства или сохранённое значение."""
         if self.camera and self.camera.trm12:
@@ -672,6 +759,21 @@ class ChamberProcess:
         return self._heating_rate
 
     def _get_shaft_temp_cached(self):
+        """Возвращает последнее измерение температуры вала.
+        TTL-кэш живёт в CameraController (_shaft_temp_cache_ttl)."""
+        # Если идёт серия нагревов, не инициируем новое измерение
+        if self.shaft_heating_active:
+            return self.last_shaft_temp
+
+        shaft_temp, msg = self.camera.get_shaft_temperature()
+        if shaft_temp is not None:
+            self.last_shaft_temp = shaft_temp
+            self.last_shaft_temp_time = time.time()
+        else:
+            self._log(f"Ошибка измерения вала: {msg}")
+        return self.last_shaft_temp
+
+    def _get_shaft_temp_cached_old(self):
         """Возвращает последнее измерение температуры вала, обновляя при необходимости, если нагрев не активен."""
         now = time.time()
         # Если нагрев активен, не измеряем, возвращаем старое значение
@@ -899,7 +1001,8 @@ class ChamberProcess:
             self.pre_hold_enabled = bool(params["pre_hold_enabled"])
 
         if "min_p_value" in params:
-            self.min_p_value = float(params["min_p_value"])
+            val = float(params["min_p_value"])
+            self.min_p_value = max(0.1, val)  # защита от 0 и отрицательных
 
 
     def _adjust_fan_speed(self):
@@ -985,8 +1088,11 @@ class ChamberProcess:
         self._log(f"Запуск ручного режима: цель {target_temp}°C, выдержка {hold_minutes} мин")
         self.camera.set_temperature(target_temp, channel=0)
         self.camera.turn_on_camera()
-        self.current_fan_speed = 1000
-        self.camera.set_fan_speed(1000)
+        default_fan = self._get_default_fan_speed(target_temp)
+        self.current_fan_speed = default_fan
+        self.camera.set_fan_speed(default_fan)
+        self._log(f"Скорость вентилятора по умолчанию: {default_fan} об/мин "
+                  f"(цель {target_temp}°C)")
         self._thread = threading.Thread(target=self._process_loop, daemon=True)
         self._thread.start()
 
@@ -1011,15 +1117,43 @@ class ChamberProcess:
             import copy
             return copy.deepcopy(self.data)
 
-    def _update_data(self, **kwargs):
+    def _update_data_old(self, **kwargs):
         """Обновить поля данных (потокобезопасно)"""
         with self._lock:
             for key, value in kwargs.items():
                 if hasattr(self.data, key):
                     setattr(self.data, key, value)
 
+    def _update_data(self, **kwargs):
+        with self._lock:
+            for key, value in kwargs.items():
+                if value is None:
+                    continue  # не перезаписываем нулём/None
+                if hasattr(self.data, key):
+                    setattr(self.data, key, value)
 
     def _read_sensors(self):
+        """Чтение текущих показаний с устройств.
+        Если какой-то датчик не отвечает — НЕ подменяем значение нулём,
+        а оставляем None, чтобы вызывающий код мог отличить сбой от реального нуля.
+        """
+        temp, _ = self.camera.get_chamber_temperature()
+        grad, _ = self.camera.get_gradient()
+        speed = self.camera.get_fan_speed()
+        current = self.camera.get_motor_current()
+        pid = self.camera.get_pid_parameters(channel=0) or {}
+        return {
+            'current_temp': temp,  # может быть None
+            'gradient': grad,  # может быть None
+            'fan_speed': speed,  # может быть None
+            'motor_current': current if current is not None else 0.0,
+            'p_value': pid.get('P', 0.0),
+            'i_value': pid.get('I', 0),
+            'd_value': pid.get('D', 0),
+        }
+
+
+    def _read_sensors_old(self):
         """Чтение текущих показаний с устройств"""
         temp, _ = self.camera.get_chamber_temperature()
         grad, _ = self.camera.get_gradient()
@@ -1155,8 +1289,12 @@ class ChamberProcess:
             self.camera.set_temperature(target, channel=0)
             self._current_setpoint = target
             self._update_data(current_setpoint=target)
-            self.current_fan_speed = 1000
-            self.camera.set_fan_speed(1000)
+
+            default_fan = self._get_default_fan_speed(target)
+            self.current_fan_speed = default_fan
+            self.camera.set_fan_speed(default_fan)
+            self._log(f"Скорость вентилятора по умолчанию: {default_fan} об/мин "
+                      f"(цель {target}°C)")
 
             # ============ ШАГ 2: Упрощённая стабилизация ============
             self._log(
@@ -1269,8 +1407,10 @@ class ChamberProcess:
                 self.camera.set_temperature(target, channel=0)
                 self._current_setpoint = target
                 self._update_data(current_setpoint=target)
-                self.current_fan_speed = 1000
-                self.camera.set_fan_speed(1000)
+
+                default_fan = self._get_default_fan_speed(target)
+                self.current_fan_speed = default_fan
+                self.camera.set_fan_speed(default_fan)
 
                 if not self._wait_for_stabilization(timeout=self.stabilization_timeout_default):
                     self._log("Ошибка стабилизации перед полным подбором")
@@ -1730,10 +1870,19 @@ class ChamberProcess:
                 last_correction_time = time.time()
             time.sleep(self.update_interval)
 
-
-
-
     def apply_preset(self):
+        """Установка рекомендуемых параметров PID и скорости нагрева."""
+        self.camera.set_pid_parameters(P=0.5, I=3, D=200, deadband=0.0,
+                                       output_min=0.0, output_max=100.0, channel=0)
+        self.set_heating_rate(self._heating_rate)
+
+        # Раньше писали в trm12 напрямую — теперь через обёртку CameraController
+        self.camera.trm12_write_parameter("DB.D", 0.05, channel=0)  # минимальный ход
+        self.camera.trm12_write_parameter("U.NOT", 5, channel=0)  # полное время хода
+        self.camera.trm12_write_parameter("U.GAP", 5, channel=0)  # выборка люфта
+        self.camera.trm12_write_parameter("UR.EU", 0.5, channel=0)  # время реверса
+
+    def apply_preset_old(self):
         """Установка рекомендуемых параметров PID и скорости нагрева для начала работы"""
         self.camera.set_pid_parameters(P=0.5, I=3, D=200, deadband=0.0,
                                        output_min=0.0, output_max=100.0, channel=0)

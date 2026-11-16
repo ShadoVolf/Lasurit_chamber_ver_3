@@ -313,9 +313,47 @@ class TPM12_GUI:
             except Exception as e:
                 print(f"Ошибка загрузки корректора вала: {e}")
 
-
-
     def _get_data_from_device(self):
+        """Получение данных с устройства.
+        Если ChamberProcess запущен — градиент и температуры берём из него.
+        Прямое измерение get_gradient() делаем только когда процесс не запущен,
+        т.к. он держит общий _lock на время sleep.
+        """
+        if not self.connected_status:
+            self.device_error = "Драйвер не установлен"
+            return {}
+
+        try:
+            set_temp = self.driver.get_chamber_setpoint()
+            cur_temp = self.driver.get_chamber_temperature()
+
+            if set_temp is not None:
+                temp_ch1 = float(cur_temp[0]) if cur_temp is not None else 0.0
+                setpoint = float(set_temp[0])
+            else:
+                temp_ch1 = 0.0
+                setpoint = 0.0
+
+            # Градиент: только если процесс НЕ запущен
+            if self.chamber_process is not None and self.chamber_process.is_running():
+                grad = 0.0
+            else:
+                grad_temp, _ = self.driver.get_gradient()
+                grad = grad_temp if grad_temp is not None else 0.0
+
+            mode_dice = self.driver.get_control_mode() or {}
+
+            return {
+                'temp_ch1': temp_ch1,
+                'setpoints': setpoint,
+                'gradient': grad,
+                'control_mode': mode_dice,
+            }
+        except Exception as e:
+            self.device_error = f"Ошибка чтения: {str(e)}"
+            return {}
+
+    def _get_data_from_device_old(self):
         """Получение данных с устройства."""
         if not self.connected_status:
             self.device_error = "Драйвер не установлен"
@@ -428,6 +466,38 @@ class TPM12_GUI:
         self._update_display()
 
     def _update_display(self):
+        dpg = self.dpg
+        try:
+            if dpg.does_item_exist(f"{self.tag}_temp_ch1_val"):
+                dpg.set_value(f"{self.tag}_temp_ch1_val", f"{self.temp_ch1:3.2f}°C")
+            if dpg.does_item_exist(f"{self.tag}_temp_ch2_val"):
+                dpg.set_value(f"{self.tag}_temp_ch2_val", f"{self.temp_ch2:3.2f}°C")
+            if dpg.does_item_exist(f"{self.tag}_setpoint_val"):
+                dpg.set_value(f"{self.tag}_setpoint_val", f"{self.user_setpoint:3.1f}°C")
+            if dpg.does_item_exist(f"{self.tag}_status_val"):
+                dpg.set_value(f"{self.tag}_status_val", self.status.value)
+
+            # Тема: ALARM -> красная, иначе -> обычная
+            if dpg.does_item_exist(f"{self.tag}_status_panel"):
+                if self.status == ChamberStatus.ALARM:
+                    dpg.bind_item_theme(f"{self.tag}_status_panel", "alarm_theme")
+                else:
+                    dpg.bind_item_theme(f"{self.tag}_status_panel", "status_theme")
+
+            if dpg.does_item_exist(f"{self.tag}_current_setpoint_val"):
+                dpg.set_value(f"{self.tag}_current_setpoint_val", f"{self.device_setpoint:3.1f}°C")
+
+            if hasattr(self, '_remaining_hold') and self._remaining_hold > 0:
+                hours = int(self._remaining_hold // 3600)
+                minutes = int((self._remaining_hold % 3600) // 60)
+                seconds = int(self._remaining_hold % 60)
+                if dpg.does_item_exist(f"{self.tag}_power_val"):
+                    dpg.set_value(f"{self.tag}_power_val",
+                                  f"{hours:02d}:{minutes:02d}:{seconds:02d}")
+        except Exception as e:
+            print(f"Ошибка обновления отображения: {e}")
+
+    def _update_display_old(self):
         """Обновление отображения в интерфейсе."""
         dpg = self.dpg
         try:
@@ -663,11 +733,16 @@ class TPM12_GUI:
 
         self.start_update_thread()
 
-    def _open_correction_plot_dialog(self):
+    def _open_correction_plot_dialog_old(self):
         # Принудительно загружаем корректоры, если ещё не загружены
         if self.corrector_ch1 is None and self.correction_file_ch1.exists():
             self._load_corrections()
         show_correction_plot_dialog(self)
+        show_correction_plot_dialog(self)
+
+    def _open_correction_plot_dialog(self):
+        if self.corrector_ch1 is None and self.correction_file_ch1.exists():
+            self._load_corrections()
         show_correction_plot_dialog(self)
 
     # ---------- Методы открытия диалогов ----------

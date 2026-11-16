@@ -243,7 +243,7 @@ def _create_input_fields(dpg_instance, parent_tag, base_tag, current_settings, t
         ("pre_hold_enabled",
          "Пред. выдержка (отсчёт с первичной стабилизации)",
          "bool", None, None, None),
-        ("min_p_value", "Минимальное значение P", "float", 0.1, 0.0, 20.0),
+        ("min_p_value", "Минимальное значение P", "float", 0.1, 0.1, 20.0),
     ]
 
     with dpg_instance.table(

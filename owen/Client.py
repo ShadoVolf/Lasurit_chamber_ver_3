@@ -1,4 +1,5 @@
 import struct
+import threading
 from enum import Enum
 from typing import Optional, Dict, List, Union, Any
 from pymodbus.client import ModbusSerialClient
@@ -142,6 +143,9 @@ class TRM12Driver:
         self.baudrate = baudrate
         self.byte_order = byte_order
 
+        # Внутренний lock — защищает pymodbus-клиент от многопоточных вызовов
+        self._io_lock = threading.RLock()
+
         # Создание клиента Modbus
         self.client = ModbusSerialClient(
             port=port,
@@ -162,7 +166,7 @@ class TRM12Driver:
         """Включение/выключение отладки."""
         self._debug = enabled
 
-    def connect(self) -> bool:
+    def connect_old(self) -> bool:
         """Подключение к устройству."""
         try:
             self._connected = self.client.connect()
@@ -175,7 +179,20 @@ class TRM12Driver:
                 print(f"Ошибка подключения: {e}")
             return False
 
-    def disconnect(self):
+    def connect(self) -> bool:
+        with self._io_lock:
+            try:
+                self._connected = self.client.connect()
+                if self._debug:
+                    print(f"Подключение к {self.port}: {self._connected}")
+                return self._connected
+            except Exception as e:
+                self._last_error = str(e)
+                if self._debug:
+                    print(f"Ошибка подключения: {e}")
+                return False
+
+    def disconnect_old(self):
         """Отключение от устройства."""
         if self.client.connected:
             self.client.close()
@@ -183,6 +200,14 @@ class TRM12Driver:
 
         if self._debug:
             print("Отключено от устройства")
+
+    def disconnect(self):
+        with self._io_lock:
+            if self.client.connected:
+                self.client.close()
+            self._connected = False
+            if self._debug:
+                print("Отключено от устройства")
 
     def is_connected(self) -> bool:
         """Проверка подключения."""
@@ -260,6 +285,39 @@ class TRM12Driver:
         return address, param_type
 
     def read_parameter(self, param_name: str, channel: int = 0) -> Optional[Union[int, float, str]]:
+        with self._io_lock:
+            try:
+                address, param_type = self._get_parameter_address(param_name, channel)
+                if self._debug:
+                    print(f"Чтение {param_name} (канал {channel}) -> адрес {hex(address)}")
+
+                if param_type == "U16":
+                    response = self.client.read_holding_registers(address, 1, slave=self.address)
+                    if not response.isError():
+                        return response.registers[0]
+                elif param_type == "F32":
+                    response = self.client.read_holding_registers(address, 2, slave=self.address)
+                    if not response.isError():
+                        return self._convert_float32_from_registers(response.registers)
+                elif param_type == "STR":
+                    length = self.PARAMETERS[param_name].get("length", 8)
+                    reg_count = (length + 1) // 2
+                    response = self.client.read_holding_registers(address, reg_count, slave=self.address)
+                    if not response.isError():
+                        bytes_data = b''
+                        for reg in response.registers:
+                            bytes_data += struct.pack('>H', reg)
+                        return bytes_data.decode('ascii', errors='ignore').rstrip('\x00')
+                else:
+                    raise ValueError(f"Неподдерживаемый тип данных: {param_type}")
+            except (ModbusException, ValueError, struct.error) as e:
+                self._last_error = f"Ошибка чтения параметра {param_name}: {e}"
+                if self._debug:
+                    print(f"  Исключение: {e}")
+                return None
+            return None
+
+    def read_parameter_old(self, param_name: str, channel: int = 0) -> Optional[Union[int, float, str]]:
         """Чтение параметра по имени."""
         try:
             address, param_type = self._get_parameter_address(param_name, channel)
@@ -308,6 +366,36 @@ class TRM12Driver:
         return None
 
     def write_parameter(self, param_name: str, value: Union[int, float, str], channel: int = 0) -> bool:
+        with self._io_lock:
+            try:
+                address, param_type = self._get_parameter_address(param_name, channel)
+                if self._debug:
+                    print(f"Запись {param_name} (канал {channel}) = {value}")
+
+                if param_type == "U16":
+                    response = self.client.write_register(address, int(value), slave=self.address)
+                    return not response.isError()
+                elif param_type == "F32":
+                    registers = self._convert_float32_to_registers(float(value))
+                    response = self.client.write_registers(address, registers, slave=self.address)
+                    return not response.isError()
+                elif param_type == "STR":
+                    bytes_data = value.encode('ascii')[:self.PARAMETERS[param_name].get("length", 8)]
+                    bytes_data = bytes_data.ljust(self.PARAMETERS[param_name].get("length", 8), b'\x00')
+                    registers = []
+                    for i in range(0, len(bytes_data), 2):
+                        registers.append(struct.unpack('>H', bytes_data[i:i + 2])[0])
+                    response = self.client.write_registers(address, registers, slave=self.address)
+                    return not response.isError()
+                else:
+                    raise ValueError(f"Неподдерживаемый тип данных: {param_type}")
+            except (ModbusException, ValueError, struct.error) as e:
+                self._last_error = f"Ошибка записи параметра {param_name}: {e}"
+                if self._debug:
+                    print(f"  Исключение: {e}")
+                return False
+
+    def write_parameter_old(self, param_name: str, value: Union[int, float, str], channel: int = 0) -> bool:
         """Запись значения параметра."""
         try:
             address, param_type = self._get_parameter_address(param_name, channel)

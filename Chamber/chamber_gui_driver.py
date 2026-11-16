@@ -135,8 +135,85 @@ def _emergency_stop(dpg, camera_controller):
         dpg.set_value("status_text", f"Ошибка: {str(e)}")
         dpg.configure_item("status_text", color=[255, 100, 100])
 
-
 def _update_status(dpg, camera_controller):
+    """Обновление статуса системы."""
+    try:
+        status = camera_controller.check_connection_status()
+        _update_device_status(dpg, status, camera_controller)
+
+        if camera_controller.connected:
+            _update_system_data(dpg, camera_controller)
+
+        dpg.set_value("status_text", "Статус обновлен")
+        dpg.configure_item("status_text", color=[100, 255, 100])
+    except Exception as e:
+        dpg.set_value("status_text", f"Ошибка обновления: {str(e)}")
+        dpg.configure_item("status_text", color=[255, 100, 100])
+
+
+def _update_system_data(dpg, camera_controller):
+    """Обновление данных системы. Если запущен процесс — берём из ChamberProcess."""
+    try:
+        # 1. Пробуем получить данные из процесса (там уже всё измерено)
+        process = None
+        try:
+            from Ports_COM.Devices_Data import DEVICES_DATA
+            gui = DEVICES_DATA.get_owen_gui()
+            if gui is not None:
+                process = getattr(gui, "chamber_process", None)
+        except Exception:
+            process = None
+
+        used_process_data = False
+        if process is not None and process.is_running():
+            try:
+                data = process.get_data()
+                # current_temp может быть None — тогда не трогаем поле
+                if data.current_temp:
+                    dpg.set_value("chamber_temp_text", f"{data.current_temp:.2f}")
+                if data.gradient is not None:
+                    dpg.set_value("gradient_text", f"{data.gradient:.2f}")
+                if data.fan_speed is not None:
+                    dpg.set_value("motor_speed_text", str(data.fan_speed))
+                if data.motor_current is not None:
+                    dpg.set_value("motor_current_text", str(data.motor_current))
+                used_process_data = True
+            except Exception as e:
+                print(f"process.get_data: {e}")
+
+        # 2. Если процесса нет — опрашиваем напрямую (как было)
+        if not used_process_data:
+            temp, _ = camera_controller.get_chamber_temperature()
+            if temp is not None:
+                dpg.set_value("chamber_temp_text", f"{temp:.2f}")
+
+            speed = camera_controller.get_fan_speed()
+            if speed is not None:
+                dpg.set_value("motor_speed_text", str(speed))
+
+            current = camera_controller.get_motor_current()
+            if current is not None:
+                dpg.set_value("motor_current_text", str(current))
+
+        # 3. Режим TRM12 — читаем через обёртку
+        oven_status = camera_controller.get_oven_status()
+        if oven_status:
+            mode_map = {"Ручной": "РУЧНОЙ",
+                        "Автоматический": "АВТОМАТИЧЕСКИЙ",
+                        "Авария": "АВАРИЯ"}
+            mode = oven_status
+            dpg.set_value("system_mode_text", mode_map.get(mode, mode))
+            if mode == "Авария":
+                dpg.configure_item("system_mode_text", color=[255, 100, 100])
+            elif mode == "Автоматический":
+                dpg.configure_item("system_mode_text", color=[100, 255, 100])
+            else:
+                dpg.configure_item("system_mode_text", color=[200, 200, 100])
+
+    except Exception as e:
+        print(f"Ошибка обновления данных: {e}")
+
+def _update_status_old(dpg, camera_controller):
     """Обновление статуса системы"""
     try:
         status = camera_controller.check_connection_status()
@@ -152,8 +229,117 @@ def _update_status(dpg, camera_controller):
         dpg.set_value("status_text", f"Ошибка обновления: {str(e)}")
         dpg.configure_item("status_text", color=[255, 100, 100])
 
-
 def _update_device_status(dpg, status, camera_controller):
+    """Обновление статуса отдельных устройств."""
+    # --- TRM12 ---
+    trm12_status = status['devices'].get('TRM12', {})
+    if trm12_status.get('connected'):
+        dpg.set_value("trm12_status_text", "ПОДКЛЮЧЕН")
+        dpg.configure_item("trm12_status_text", color=[100, 255, 100])
+
+        try:
+            info = camera_controller.get_device_info_trm12()
+            if info:
+                dpg.set_value("trm12_version_text",
+                              f"{str(info['device_id'])} ПО {str(info['firmware_version'])}")
+        except Exception as e:
+            print(f"TRM12 get_device_info: {e}")
+
+        try:
+            set_temp = camera_controller.get_chamber_setpoint()
+            cur_temp = camera_controller.get_chamber_temperature()
+            if set_temp is not None:
+                dpg.set_value('trm12_temp_value', f"{float(set_temp[0]):.2f}")
+            if cur_temp is not None:
+                dpg.set_value('chamber_temp_text', f"{float(cur_temp[0]):.2f}")
+        except Exception as e:
+            print(f"TRM12 setpoint/temp: {e}")
+
+        try:
+            grad_temp, _ = camera_controller.get_gradient()
+            if grad_temp is not None:
+                dpg.set_value('gradient_text', f"{float(grad_temp):.2f}")
+        except Exception as e:
+            print(f"TRM12 gradient: {e}")
+
+        try:
+            val_temp, _ = camera_controller.get_shaft_temperature()
+            if val_temp is not None:
+                dpg.set_value('motor_temp_text', f"{float(val_temp):.2f}")
+        except Exception as e:
+            print(f"TRM12 shaft temp: {e}")
+    else:
+        dpg.set_value("trm12_status_text", "ОТКЛЮЧЕН")
+        dpg.configure_item("trm12_status_text", color=[255, 100, 100])
+        dpg.set_value("trm12_version_text", "Не подключен")
+
+    # --- BLSD-20 ---
+    blsd20_status = status['devices'].get('BLSD20', {})
+    if blsd20_status.get('connected'):
+        dpg.set_value("blsd20_status_text", "ПОДКЛЮЧЕН")
+        dpg.configure_item("blsd20_status_text", color=[100, 255, 100])
+
+        # Каждое чтение — отдельный try
+        try:
+            info = camera_controller.get_device_info_blsd20()
+            if info:
+                dpg.set_value(
+                    "blsd20_version_text",
+                    f" Драйвер {str(info.get('Тип драйвера (hex)', '--'))} "
+                    f"ПО {str(info.get('Версия аппаратной части', '--'))}."
+                    f"{str(info.get('Идентификатор ПО', '--'))}."
+                    f"{str(info.get('Версия ПО', '--'))}"
+                )
+        except Exception as e:
+            print(f"BLSD get_device_info: {e}")
+
+        try:
+            set_speed = camera_controller.get_fan_set_speed()
+            if set_speed is not None:
+                dpg.set_value('blsd20_speed_value', str(set_speed))
+        except Exception as e:
+            print(f"BLSD get_set_speed: {e}")
+
+        try:
+            cur_speed = camera_controller.get_fan_speed()
+            if cur_speed is not None:
+                dpg.set_value('motor_speed_text', str(cur_speed))
+        except Exception as e:
+            print(f"BLSD get_speed: {e}")
+
+        try:
+            cur_current = camera_controller.get_motor_current()
+            if cur_current is not None:
+                dpg.set_value('motor_current_text', str(cur_current))
+        except Exception as e:
+            print(f"BLSD get_current: {e}")
+    else:
+        dpg.set_value("blsd20_status_text", "ОТКЛЮЧЕН")
+        dpg.configure_item("blsd20_status_text", color=[255, 100, 100])
+        dpg.set_value("blsd20_version_text", "Не подключен")
+
+    # --- Relay ---
+    relay_status = status['devices'].get('Relay', {})
+    if relay_status.get('connected'):
+        dpg.set_value("relay_status_text", "ПОДКЛЮЧЕНА")
+        #camera_controller.relay.close_all_relays()
+        dpg.configure_item("relay_status_text", color=[100, 255, 100])
+        try:
+            states = camera_controller.relay.get_relay_states()
+            state_str = ""
+            for i in range(1, 5):
+                state = states.get(f"RELAY{i}")
+                state_str += "1" if state and state.value == 1 else "0"
+            dpg.set_value("relay_state_value", state_str)
+        except Exception:
+            dpg.set_value("relay_state_value", "----")
+    else:
+        dpg.set_value("relay_status_text", "ОТКЛЮЧЕНА")
+        dpg.configure_item("relay_status_text", color=[255, 100, 100])
+        dpg.set_value("relay_state_value", "----")
+
+
+def _update_device_status_old(dpg, status, camera_controller):
     """Обновление статуса отдельных устройств"""
     # TRM12
     trm12_status = status['devices'].get('TRM12', {})
