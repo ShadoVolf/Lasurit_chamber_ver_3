@@ -2,6 +2,7 @@ import json
 import os
 import time
 import threading
+from collections import deque
 from typing import Optional
 from datetime import datetime
 
@@ -112,6 +113,13 @@ class ChamberProcess:
         self._current_hold_seconds = 0.0  # длительность текущей выдержки (для GUI)
 
         self.min_p_value = 1.5
+
+        # === Параметры умного подхода к температуре ===
+        self.smart_approach_enabled = True  # Включение умного подхода
+        self.deceleration_zone = 2.0  # Зона начального торможения (°C)
+        self.fine_zone = 0.5  # Зона точной настройки (°C)
+        self.braking_factor = 0.7  # Коэффициент торможения (0.5-0.9)
+        self.prediction_horizon = 10.0  # Горизонт предсказания (секунды)
 
     def _load_pid_for_step(self, step_index: int, target_temp: float) -> Optional[dict]:
         """
@@ -1000,6 +1008,18 @@ class ChamberProcess:
         if "pre_hold_enabled" in params:
             self.pre_hold_enabled = bool(params["pre_hold_enabled"])
 
+        # === Параметры умного подхода ===
+        if "smart_approach_enabled" in params:
+            self.smart_approach_enabled = bool(params["smart_approach_enabled"])
+        if "deceleration_zone" in params:
+            self.deceleration_zone = float(params["deceleration_zone"])
+        if "fine_zone" in params:
+            self.fine_zone = float(params["fine_zone"])
+        if "braking_factor" in params:
+            self.braking_factor = float(params["braking_factor"])
+        if "prediction_horizon" in params:
+            self.prediction_horizon = float(params["prediction_horizon"])
+
         if "min_p_value" in params:
             val = float(params["min_p_value"])
             self.min_p_value = max(0.1, val)  # защита от 0 и отрицательных
@@ -1183,7 +1203,7 @@ class ChamberProcess:
         # Этап 1: Выход на температуру
         self._update_data(process_status=ProcessStatus.HEATING, target_temp=target)
         self._log(f"Этап НАГРЕВ: целевая температура {target}°C")
-        if not self._wait_for_target(target):
+        if not self._smart_wait_for_target(target):
             self._update_data(process_status=ProcessStatus.ERROR)
             self._log("Ошибка: не удалось достичь целевой температуры")
             self.camera.turn_off_camera()
@@ -1254,6 +1274,88 @@ class ChamberProcess:
             time.sleep(self.update_interval)
 
         self._log("Таймаут или остановка при ожидании пересечения температуры")
+        self._log("Таймаут иди остановка при ожидании пересечения температуры")
+        return False
+
+    def _smart_wait_for_target(self, target: float) -> bool:
+        """
+        Умное ожидание достижения целевой температуры с предсказанием и плавным подходом.
+        
+        Использует линейную экстраполяцию для предсказания момента достижения целевой температуры
+        и плавного торможения перед ней, чтобы избежать перерегулирования.
+        """
+        if not self.smart_approach_enabled:
+            return self._wait_for_target(target)
+
+        timeout = 3600
+        start = time.time()
+        prev_temp = None
+        prev_time = time.time()
+        velocity_history = deque(maxlen=5)
+
+        while not self._stop_event.is_set() and (time.time() - start) < timeout:
+            sensors = self._read_sensors()
+            current = sensors['current_temp']
+            current_time = time.time()
+
+            self._update_data(**sensors)
+            self._ensure_fan_running()
+            self._check_and_heat_shaft(current)
+            self._manage_shaft_heating_series()
+
+            # Вычисляем скорость изменения температуры
+            if prev_temp is not None and (current_time - prev_time) > 0:
+                velocity = (current - prev_temp) / (current_time - prev_time)
+                velocity_history.append(velocity)
+
+            prev_temp = current
+            prev_time = current_time
+
+            # Средняя скорость за последние N измерений
+            avg_velocity = sum(velocity_history) / len(velocity_history) if velocity_history else 0
+
+            # Предсказываем температуру через prediction_horizon секунд
+            if avg_velocity != 0:
+                predicted_temp = current + avg_velocity * self.prediction_horizon
+            else:
+                predicted_temp = current
+
+            self._log(
+                f"НАГРЕВ: T={current:.2f}°C, цель={target:.2f}°C, "
+                f"скорость={avg_velocity:.2f}°C/с, предск={predicted_temp:.2f}°C"
+            )
+
+            diff = abs(current - target)
+
+            # Зона торможения
+            if diff < self.deceleration_zone and avg_velocity > 0.05:
+                lookahead_temp = current + avg_velocity * 2
+
+                if lookahead_temp > target:
+                    new_setpoint = target - (lookahead_temp - target) * self.braking_factor
+                    new_setpoint = max(new_setpoint, target - 1.0)
+                    self.camera.set_temperature(new_setpoint, channel=0)
+                    self._current_setpoint = new_setpoint
+                    self._update_data(current_setpoint=new_setpoint)
+                    self._log(f"Торможение: setpoint = {new_setpoint:.2f}°C")
+
+            # Зона точной настройки
+            if diff < self.fine_zone:
+                self._log(f"Достигнута зона точной настройки ({diff:.2f} < {self.fine_zone:.2f})")
+                return True
+
+            # Проверка пересечения (fallback)
+            if prev_temp is not None:
+                prev_diff = prev_temp - target
+                curr_diff = current - target
+
+                if prev_diff * curr_diff <= 0 and diff < 1.0:
+                    self._log(f"Пересечение целевой температуры: {prev_temp:.2f} → {current:.2f}°C")
+                    return True
+
+            time.sleep(self.update_interval)
+
+        self._log("Таймаут иди остановка при ожидании пересечения температуры")
         return False
 
 

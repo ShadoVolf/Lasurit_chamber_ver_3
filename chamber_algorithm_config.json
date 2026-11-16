@@ -21,5 +21,10 @@
     "shaft_heating_interval": 40.0,
     "fan_control_enabled": true,
     "shaft_check_enabled": true,
-    "auto_apply_pid": true
+    "auto_apply_pid": true,
+    "smart_approach_enabled": true,
+    "deceleration_zone": 2.0,
+    "fine_zone": 0.5,
+    "braking_factor": 0.7,
+    "prediction_horizon": 10.0
 }
