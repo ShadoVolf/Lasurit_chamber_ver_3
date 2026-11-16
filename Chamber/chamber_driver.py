@@ -11,6 +11,15 @@ from tabulate import tabulate
 
 from owen.Temp_Corrector_class import PolynomialCorrector
 
+# Emulation support
+try:
+    from Emulation import get_emulation_manager
+    from Emulation.device_adapters import EmulatedTRM12Driver, EmulatedBLSD20Driver, EmulatedRS232RelayDriver
+    EMULATION_AVAILABLE = True
+except ImportError:
+    EMULATION_AVAILABLE = False
+    get_emulation_manager = None
+
 
 class CameraController:
     """
@@ -160,6 +169,13 @@ class CameraController:
             return False, f"Ошибка создания драйвера {device_type}: {e}"
 
     def _connect_device(self, device_type: DeviceType) -> Tuple[bool, str]:
+        if EMULATION_AVAILABLE:
+            emulation_manager = get_emulation_manager()
+            if emulation_manager.is_enabled():
+                device_name = device_type.value.lower()
+                if emulation_manager.is_device_emulated(device_name):
+                    return self._connect_emulated_device(device_type)
+        
         try:
             driver_current = self.devices_data.get_device_driver(device_type)
             if driver_current is None:
@@ -1026,6 +1042,31 @@ class CameraController:
     def __enter__(self):
         self.connect_all()
         return self
+
+    def _connect_emulated_device(self, device_type: DeviceType) -> Tuple[bool, str]:
+        try:
+            emulation_manager = get_emulation_manager()
+            if device_type == DeviceType.TRM12:
+                emulator = emulation_manager.get_trm12_emulator()
+                if emulator:
+                    self.trm12 = EmulatedTRM12Driver(emulator)
+                    return True, "Connected to TRM12 emulator"
+                return False, "TRM12 emulator not available"
+            elif device_type == DeviceType.BLSD20:
+                emulator = emulation_manager.get_blsd20_emulator()
+                if emulator:
+                    self.blsd20 = EmulatedBLSD20Driver(emulator)
+                    return True, "Connected to BLSD20 emulator"
+                return False, "BLSD20 emulator not available"
+            elif device_type == DeviceType.RS232_4PIN_RELAY:
+                emulator = emulation_manager.get_rs232_relay_emulator()
+                if emulator:
+                    self.relay = EmulatedRS232RelayDriver(emulator)
+                    return True, "Connected to RS232 Relay emulator"
+                return False, "RS232 Relay emulator not available"
+            return False, f"Emulation not supported for {device_type.value}"
+        except Exception as e:
+            return False, f"Error connecting to emulator {device_type.value}: {e}"
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.disconnect_all()

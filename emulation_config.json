@@ -1,0 +1,29 @@
+{
+  "emulation_enabled": false,
+  "emulate_trm12": true,
+  "emulate_blsd20": true,
+  "emulate_rs232_relay": true,
+  
+  "trm12_emulation": {
+    "initial_temperature": 25.0,
+    "heating_rate": 2.0,
+    "cooling_rate": 1.0,
+    "temperature_noise": 0.1,
+    "simulation_interval": 0.5
+  },
+  
+  "blsd20_emulation": {
+    "initial_speed": 0,
+    "max_speed": 3000,
+    "acceleration": 100,
+    "deceleration": 100,
+    "initial_position": 0,
+    "simulation_interval": 0.5
+  },
+  
+  "rs232_relay_emulation": {
+    "initial_state": false,
+    "response_delay": 0.1,
+    "simulation_interval": 0.5
+  }
+}
